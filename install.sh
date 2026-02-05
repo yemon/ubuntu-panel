@@ -1,7 +1,7 @@
 #!/bin/bash
 
 # VPS Manager Installation Script
-# For Ubuntu 23.04 LTS
+# For Ubuntu 24.04 LTS
 
 set -e
 

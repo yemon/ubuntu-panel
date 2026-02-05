@@ -6,6 +6,16 @@ A modern, web-based control panel for managing Ubuntu VPS servers. Built with Fl
 ![Python](https://img.shields.io/badge/python-3.8+-blue.svg)
 ![Flask](https://img.shields.io/badge/flask-2.3+-green.svg)
 
+## ⚠️ Important Disclaimer
+
+**This project was coded entirely by Claude AI.** While functional, AI-generated code should always be reviewed carefully before use, especially for system administration tools that execute commands with elevated privileges. Please:
+
+- Review all code thoroughly before deployment
+- Test in a safe environment first
+- Understand the security implications
+- Add proper authentication before exposing to any network
+- Consider this as a starting point, not production-ready software
+
 ## ✨ Features
 
 ### 📊 System Monitoring
@@ -46,7 +56,7 @@ A modern, web-based control panel for managing Ubuntu VPS servers. Built with Fl
 ## 🚀 Quick Start
 
 ### Prerequisites
-- Ubuntu 23.04 LTS or compatible
+- Ubuntu 24.04 LTS or compatible
 - Python 3.8+
 - sudo privileges
 
