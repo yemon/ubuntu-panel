@@ -1,0 +1,502 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>VPS Manager</title>
+    <style>
+        * { margin: 0; padding: 0; box-sizing: border-box; }
+        body { font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, sans-serif; background: #0f172a; color: #e2e8f0; min-height: 100vh; }
+        .container { max-width: 1400px; margin: 0 auto; padding: 20px; }
+        h1 { text-align: center; margin-bottom: 30px; color: #38bdf8; font-size: 2rem; }
+        .grid { display: grid; grid-template-columns: repeat(auto-fit, minmax(300px, 1fr)); gap: 20px; }
+        .card { background: #1e293b; border-radius: 12px; padding: 20px; border: 1px solid #334155; }
+        .card h2 { color: #38bdf8; margin-bottom: 15px; font-size: 1.1rem; display: flex; align-items: center; gap: 8px; }
+        .card h2::before { content: ''; width: 8px; height: 8px; background: #38bdf8; border-radius: 50%; }
+        .info-row { display: flex; justify-content: space-between; padding: 8px 0; border-bottom: 1px solid #334155; }
+        .info-row:last-child { border-bottom: none; }
+        .info-label { color: #94a3b8; }
+        .info-value { color: #f1f5f9; font-family: monospace; }
+        .software-item { display: flex; justify-content: space-between; align-items: center; padding: 12px; background: #0f172a; border-radius: 8px; margin-bottom: 10px; }
+        .software-info { flex: 1; }
+        .software-name { font-weight: 600; color: #f1f5f9; }
+        .software-version { font-size: 0.85rem; color: #64748b; font-family: monospace; margin-top: 4px; }
+        .status-badge { padding: 4px 12px; border-radius: 20px; font-size: 0.75rem; font-weight: 600; }
+        .status-installed { background: #166534; color: #86efac; }
+        .status-missing { background: #991b1b; color: #fca5a5; }
+        .btn { padding: 8px 16px; border: none; border-radius: 6px; cursor: pointer; font-size: 0.85rem; font-weight: 600; transition: all 0.2s; }
+        .btn-install { background: #2563eb; color: white; }
+        .btn-install:hover { background: #1d4ed8; }
+        .btn-install:disabled { background: #475569; cursor: not-allowed; }
+        .btn-action { background: #059669; color: white; margin: 2px; }
+        .btn-danger { background: #dc2626; color: white; margin: 2px; }
+        .service-item { display: flex; justify-content: space-between; align-items: center; padding: 10px; background: #0f172a; border-radius: 8px; margin-bottom: 8px; }
+        .service-status { display: flex; align-items: center; gap: 8px; }
+        .status-dot { width: 10px; height: 10px; border-radius: 50%; }
+        .status-dot.active { background: #22c55e; }
+        .status-dot.inactive { background: #ef4444; }
+        .pip-section { margin-top: 15px; }
+        .pip-input { display: flex; gap: 10px; margin-bottom: 15px; }
+        .pip-input input { flex: 1; padding: 10px; border: 1px solid #334155; border-radius: 6px; background: #0f172a; color: #f1f5f9; }
+        .pip-list { max-height: 200px; overflow-y: auto; }
+        .pip-item { padding: 6px 10px; background: #0f172a; border-radius: 4px; margin-bottom: 4px; font-family: monospace; font-size: 0.85rem; }
+        .loading { text-align: center; padding: 20px; color: #64748b; }
+        .toast { position: fixed; bottom: 20px; right: 20px; padding: 15px 25px; border-radius: 8px; color: white; font-weight: 600; z-index: 1000; animation: slideIn 0.3s ease; }
+        .toast.success { background: #166534; }
+        .toast.error { background: #991b1b; }
+        @keyframes slideIn { from { transform: translateX(100%); opacity: 0; } to { transform: translateX(0); opacity: 1; } }
+        .refresh-btn { position: fixed; top: 20px; right: 20px; background: #334155; color: #f1f5f9; padding: 10px 20px; border-radius: 8px; border: none; cursor: pointer; }
+        .refresh-btn:hover { background: #475569; }
+        .tabs { display: flex; gap: 10px; margin-bottom: 20px; border-bottom: 2px solid #334155; padding-bottom: 10px; }
+        .tab { padding: 10px 20px; background: transparent; border: none; color: #64748b; cursor: pointer; font-size: 1rem; border-radius: 6px 6px 0 0; }
+        .tab.active { background: #334155; color: #38bdf8; }
+        .tab-content { display: none; }
+        .tab-content.active { display: block; }
+        .site-item { display: flex; justify-content: space-between; align-items: center; padding: 15px; background: #0f172a; border-radius: 8px; margin-bottom: 10px; }
+        .site-info { flex: 1; }
+        .site-domain { font-weight: 600; color: #f1f5f9; font-size: 1.1rem; }
+        .site-details { font-size: 0.85rem; color: #64748b; margin-top: 4px; font-family: monospace; }
+        .site-actions { display: flex; gap: 5px; }
+        .form-group { margin-bottom: 15px; }
+        .form-group label { display: block; margin-bottom: 5px; color: #94a3b8; font-size: 0.9rem; }
+        .form-group input, .form-group select, .form-group textarea { width: 100%; padding: 10px; border: 1px solid #334155; border-radius: 6px; background: #0f172a; color: #f1f5f9; font-family: inherit; }
+        .form-group textarea { min-height: 150px; font-family: monospace; }
+        .form-row { display: grid; grid-template-columns: 1fr 1fr; gap: 15px; }
+        .checkbox-group { display: flex; align-items: center; gap: 10px; }
+        .checkbox-group input { width: auto; }
+        .modal { display: none; position: fixed; top: 0; left: 0; right: 0; bottom: 0; background: rgba(0,0,0,0.8); z-index: 1000; align-items: center; justify-content: center; }
+        .modal.active { display: flex; }
+        .modal-content { background: #1e293b; border-radius: 12px; padding: 25px; width: 90%; max-width: 700px; max-height: 90vh; overflow-y: auto; }
+        .modal-header { display: flex; justify-content: space-between; align-items: center; margin-bottom: 20px; }
+        .modal-header h3 { color: #38bdf8; }
+        .modal-close { background: none; border: none; color: #64748b; font-size: 1.5rem; cursor: pointer; }
+        .server-badge { padding: 3px 8px; border-radius: 4px; font-size: 0.75rem; font-weight: 600; margin-left: 10px; }
+        .server-badge.nginx { background: #166534; color: #86efac; }
+        .server-badge.apache { background: #9a3412; color: #fed7aa; }
+    </style>
+</head>
+<body>
+    <button class="refresh-btn" onclick="loadAll()">↻ Refresh</button>
+    <div class="container">
+        <h1>🖥️ VPS Manager</h1>
+        
+        <div class="tabs">
+            <button class="tab active" onclick="switchTab('dashboard')">Dashboard</button>
+            <button class="tab" onclick="switchTab('domains')">Domains & Sites</button>
+            <button class="tab" onclick="switchTab('software')">Software</button>
+        </div>
+        
+        <!-- Dashboard Tab -->
+        <div id="tab-dashboard" class="tab-content active">
+            <div class="grid">
+                <div class="card">
+                    <h2>System Information</h2>
+                    <div id="system-info"><div class="loading">Loading...</div></div>
+                </div>
+                <div class="card">
+                    <h2>Services</h2>
+                    <div id="services"><div class="loading">Loading...</div></div>
+                </div>
+            </div>
+        </div>
+        
+        <!-- Domains Tab -->
+        <div id="tab-domains" class="tab-content">
+            <div class="grid">
+                <div class="card" style="grid-column: span 2;">
+                    <h2>Web Server Status</h2>
+                    <div id="webserver-status"><div class="loading">Loading...</div></div>
+                </div>
+                <div class="card" style="grid-column: span 2;">
+                    <div style="display: flex; justify-content: space-between; align-items: center; margin-bottom: 15px;">
+                        <h2 style="margin: 0;">Sites & Domains</h2>
+                        <button class="btn btn-install" onclick="openCreateSiteModal()">+ Add New Site</button>
+                    </div>
+                    <div id="sites-list"><div class="loading">Loading...</div></div>
+                </div>
+            </div>
+        </div>
+        
+        <!-- Software Tab -->
+        <div id="tab-software" class="tab-content">
+            <div class="grid">
+                <div class="card" style="grid-column: span 2;">
+                    <h2>Software Status</h2>
+                    <div id="software-status"><div class="loading">Loading...</div></div>
+                </div>
+                <div class="card">
+                    <h2>Python Packages</h2>
+                    <div class="pip-section">
+                        <div class="pip-input">
+                            <input type="text" id="pip-package" placeholder="Package name (e.g., requests)">
+                            <button class="btn btn-install" onclick="installPip()">Install</button>
+                        </div>
+                        <div id="pip-list" class="pip-list"><div class="loading">Loading...</div></div>
+                    </div>
+                </div>
+            </div>
+        </div>
+    </div>
+    
+    <!-- Create Site Modal -->
+    <div id="create-site-modal" class="modal">
+        <div class="modal-content">
+            <div class="modal-header">
+                <h3>Create New Site</h3>
+                <button class="modal-close" onclick="closeModal('create-site-modal')">&times;</button>
+            </div>
+            <form id="create-site-form" onsubmit="createSite(event)">
+                <div class="form-row">
+                    <div class="form-group">
+                        <label>Domain / Subdomain *</label>
+                        <input type="text" name="domain" placeholder="example.com or sub.example.com" required>
+                    </div>
+                    <div class="form-group">
+                        <label>Location (in /var/www/) *</label>
+                        <input type="text" name="location" placeholder="mysite" required>
+                    </div>
+                </div>
+                <div class="form-row">
+                    <div class="form-group">
+                        <label>Web Server</label>
+                        <select name="server">
+                            <option value="nginx">Nginx</option>
+                            <option value="apache">Apache</option>
+                        </select>
+                    </div>
+                    <div class="form-group">
+                        <label>Site Type</label>
+                        <select name="type" onchange="togglePortField(this.value)">
+                            <option value="php">PHP Directory</option>
+                            <option value="node">Node.js (Proxy)</option>
+                        </select>
+                    </div>
+                </div>
+                <div class="form-group" id="port-group" style="display: none;">
+                    <label>Node.js Port</label>
+                    <input type="text" name="port" placeholder="3000" value="3000">
+                </div>
+                <div class="form-group">
+                    <label>Git Clone URL (optional)</label>
+                    <input type="text" name="git_url" placeholder="https://github.com/user/repo.git">
+                </div>
+                <div class="form-group">
+                    <label>Install Commands (optional)</label>
+                    <input type="text" name="install_cmd" placeholder="npm install && npm run build">
+                </div>
+                <div class="form-group">
+                    <div class="checkbox-group">
+                        <input type="checkbox" name="ssl" id="ssl-checkbox">
+                        <label for="ssl-checkbox">Enable SSL (Let's Encrypt)</label>
+                    </div>
+                </div>
+                <button type="submit" class="btn btn-install" style="width: 100%; padding: 12px;">Create Site</button>
+            </form>
+        </div>
+    </div>
+    
+    <!-- Edit Config Modal -->
+    <div id="edit-config-modal" class="modal">
+        <div class="modal-content">
+            <div class="modal-header">
+                <h3>Edit Configuration: <span id="edit-config-name"></span></h3>
+                <button class="modal-close" onclick="closeModal('edit-config-modal')">&times;</button>
+            </div>
+            <div class="form-group">
+                <label>Configuration File</label>
+                <textarea id="config-content" style="min-height: 400px;"></textarea>
+            </div>
+            <input type="hidden" id="edit-server">
+            <input type="hidden" id="edit-site-name">
+            <button class="btn btn-install" style="width: 100%; padding: 12px;" onclick="saveConfig()">Save Configuration</button>
+        </div>
+    </div>
+    
+    <script>
+        function showToast(message, type = 'success') {
+            const toast = document.createElement('div');
+            toast.className = `toast ${type}`;
+            toast.textContent = message;
+            document.body.appendChild(toast);
+            setTimeout(() => toast.remove(), 3000);
+        }
+
+        function switchTab(tab) {
+            document.querySelectorAll('.tab').forEach(t => t.classList.remove('active'));
+            document.querySelectorAll('.tab-content').forEach(t => t.classList.remove('active'));
+            document.querySelector(`[onclick="switchTab('${tab}')"]`).classList.add('active');
+            document.getElementById(`tab-${tab}`).classList.add('active');
+            if (tab === 'domains') loadWebserverInfo();
+        }
+
+        function openModal(id) { document.getElementById(id).classList.add('active'); }
+        function closeModal(id) { document.getElementById(id).classList.remove('active'); }
+        function openCreateSiteModal() { openModal('create-site-modal'); }
+        function togglePortField(type) {
+            document.getElementById('port-group').style.display = type === 'node' ? 'block' : 'none';
+        }
+
+        async function loadSystemInfo() {
+            try {
+                const res = await fetch('/api/system');
+                const data = await res.json();
+                document.getElementById('system-info').innerHTML = `
+                    <div class="info-row"><span class="info-label">Hostname</span><span class="info-value">${data.hostname}</span></div>
+                    <div class="info-row"><span class="info-label">OS</span><span class="info-value">${data.os}</span></div>
+                    <div class="info-row"><span class="info-label">Kernel</span><span class="info-value">${data.kernel}</span></div>
+                    <div class="info-row"><span class="info-label">Uptime</span><span class="info-value">${data.uptime}</span></div>
+                    <div class="info-row"><span class="info-label">Memory</span><span class="info-value">${data.memory}</span></div>
+                    <div class="info-row"><span class="info-label">Disk</span><span class="info-value">${data.disk}</span></div>
+                    <div class="info-row"><span class="info-label">CPU Cores</span><span class="info-value">${data.cpu}</span></div>
+                    <div class="info-row"><span class="info-label">IP Address</span><span class="info-value">${data.ip}</span></div>
+                `;
+            } catch (e) { document.getElementById('system-info').innerHTML = '<div class="loading">Failed to load</div>'; }
+        }
+
+        async function loadWebserverInfo() {
+            try {
+                const res = await fetch('/api/webserver');
+                const data = await res.json();
+                
+                // Web server status
+                let statusHtml = '<div style="display: flex; gap: 20px;">';
+                statusHtml += `<div class="software-item" style="flex:1;"><div class="software-info"><div class="software-name">Nginx</div></div><span class="status-badge ${data.servers.nginx ? 'status-installed' : 'status-missing'}">${data.servers.nginx ? 'Running' : 'Stopped'}</span></div>`;
+                statusHtml += `<div class="software-item" style="flex:1;"><div class="software-info"><div class="software-name">Apache</div></div><span class="status-badge ${data.servers.apache ? 'status-installed' : 'status-missing'}">${data.servers.apache ? 'Running' : 'Stopped'}</span></div>`;
+                statusHtml += '</div>';
+                document.getElementById('webserver-status').innerHTML = statusHtml;
+                
+                // Sites list
+                let sitesHtml = '';
+                
+                if (data.nginx_sites.length > 0) {
+                    sitesHtml += '<h3 style="color:#94a3b8; margin: 15px 0 10px; font-size: 0.9rem;">NGINX SITES</h3>';
+                    for (const site of data.nginx_sites) {
+                        sitesHtml += `
+                            <div class="site-item">
+                                <div class="site-info">
+                                    <div class="site-domain">${site.server_name || site.name}<span class="server-badge nginx">nginx</span></div>
+                                    <div class="site-details">${site.type === 'proxy' ? 'Proxy → ' + site.proxy : 'Root: ' + site.root}</div>
+                                </div>
+                                <span class="status-badge ${site.enabled ? 'status-installed' : 'status-missing'}">${site.enabled ? 'Enabled' : 'Disabled'}</span>
+                                <div class="site-actions">
+                                    <button class="btn btn-action" onclick="toggleSite('nginx', '${site.name}')">${site.enabled ? 'Disable' : 'Enable'}</button>
+                                    <button class="btn btn-action" onclick="editConfig('nginx', '${site.name}')">Edit</button>
+                                    <button class="btn btn-danger" onclick="deleteSite('nginx', '${site.name}')">Delete</button>
+                                </div>
+                            </div>
+                        `;
+                    }
+                }
+                
+                if (data.apache_sites.length > 0) {
+                    sitesHtml += '<h3 style="color:#94a3b8; margin: 15px 0 10px; font-size: 0.9rem;">APACHE SITES</h3>';
+                    for (const site of data.apache_sites) {
+                        sitesHtml += `
+                            <div class="site-item">
+                                <div class="site-info">
+                                    <div class="site-domain">${site.server_name || site.name}<span class="server-badge apache">apache</span></div>
+                                    <div class="site-details">${site.type === 'proxy' ? 'Proxy → ' + site.proxy : 'Root: ' + site.root}</div>
+                                </div>
+                                <span class="status-badge ${site.enabled ? 'status-installed' : 'status-missing'}">${site.enabled ? 'Enabled' : 'Disabled'}</span>
+                                <div class="site-actions">
+                                    <button class="btn btn-action" onclick="toggleSite('apache', '${site.name}')">${site.enabled ? 'Disable' : 'Enable'}</button>
+                                    <button class="btn btn-action" onclick="editConfig('apache', '${site.name}')">Edit</button>
+                                    <button class="btn btn-danger" onclick="deleteSite('apache', '${site.name}')">Delete</button>
+                                </div>
+                            </div>
+                        `;
+                    }
+                }
+                
+                if (!sitesHtml) sitesHtml = '<div class="loading">No sites configured</div>';
+                document.getElementById('sites-list').innerHTML = sitesHtml;
+                
+            } catch (e) { 
+                document.getElementById('webserver-status').innerHTML = '<div class="loading">Failed to load</div>';
+                document.getElementById('sites-list').innerHTML = '<div class="loading">Failed to load</div>';
+            }
+        }
+
+        async function createSite(e) {
+            e.preventDefault();
+            const form = e.target;
+            const data = {
+                domain: form.domain.value,
+                location: form.location.value,
+                server: form.server.value,
+                type: form.type.value,
+                port: form.port.value,
+                git_url: form.git_url.value,
+                install_cmd: form.install_cmd.value,
+                ssl: form.ssl.checked
+            };
+            
+            try {
+                const res = await fetch('/api/site/create', {
+                    method: 'POST',
+                    headers: { 'Content-Type': 'application/json' },
+                    body: JSON.stringify(data)
+                });
+                const result = await res.json();
+                showToast(result.message, result.success ? 'success' : 'error');
+                if (result.success) {
+                    closeModal('create-site-modal');
+                    form.reset();
+                    loadWebserverInfo();
+                }
+            } catch (e) { showToast('Failed to create site', 'error'); }
+        }
+
+        async function toggleSite(server, name) {
+            try {
+                const res = await fetch(`/api/site/toggle/${server}/${name}`, { method: 'POST' });
+                const data = await res.json();
+                showToast(data.message, 'success');
+                loadWebserverInfo();
+            } catch (e) { showToast('Action failed', 'error'); }
+        }
+
+        async function editConfig(server, name) {
+            try {
+                const res = await fetch(`/api/site/config/${server}/${name}`);
+                const data = await res.json();
+                document.getElementById('config-content').value = data.content;
+                document.getElementById('edit-config-name').textContent = name;
+                document.getElementById('edit-server').value = server;
+                document.getElementById('edit-site-name').value = name;
+                openModal('edit-config-modal');
+            } catch (e) { showToast('Failed to load config', 'error'); }
+        }
+
+        async function saveConfig() {
+            const server = document.getElementById('edit-server').value;
+            const name = document.getElementById('edit-site-name').value;
+            const content = document.getElementById('config-content').value;
+            
+            try {
+                const res = await fetch(`/api/site/config/${server}/${name}`, {
+                    method: 'POST',
+                    headers: { 'Content-Type': 'application/json' },
+                    body: JSON.stringify({ content })
+                });
+                const data = await res.json();
+                showToast(data.message, data.success ? 'success' : 'error');
+                if (data.success) closeModal('edit-config-modal');
+            } catch (e) { showToast('Failed to save config', 'error'); }
+        }
+
+        async function deleteSite(server, name) {
+            if (!confirm(`Delete site ${name}?`)) return;
+            try {
+                const res = await fetch(`/api/site/delete/${server}/${name}`, { method: 'DELETE' });
+                const data = await res.json();
+                showToast(data.message, 'success');
+                loadWebserverInfo();
+            } catch (e) { showToast('Delete failed', 'error'); }
+        }
+
+        async function loadSoftwareStatus() {
+            try {
+                const res = await fetch('/api/status');
+                const data = await res.json();
+                let html = '<div style="display: grid; grid-template-columns: repeat(auto-fit, minmax(280px, 1fr)); gap: 10px;">';
+                for (const [key, info] of Object.entries(data)) {
+                    html += `
+                        <div class="software-item">
+                            <div class="software-info">
+                                <div class="software-name">${info.name}</div>
+                                <div class="software-version">${info.version}</div>
+                            </div>
+                            <span class="status-badge ${info.installed ? 'status-installed' : 'status-missing'}">${info.installed ? 'Installed' : 'Missing'}</span>
+                            ${!info.installed ? `<button class="btn btn-install" onclick="installSoftware('${key}', this)">Install</button>` : ''}
+                        </div>
+                    `;
+                }
+                html += '</div>';
+                document.getElementById('software-status').innerHTML = html;
+            } catch (e) { document.getElementById('software-status').innerHTML = '<div class="loading">Failed to load</div>'; }
+        }
+
+        async function loadServices() {
+            try {
+                const res = await fetch('/api/services');
+                const data = await res.json();
+                let html = '';
+                for (const [name, info] of Object.entries(data)) {
+                    html += `
+                        <div class="service-item">
+                            <div class="service-status">
+                                <span class="status-dot ${info.active ? 'active' : 'inactive'}"></span>
+                                <span>${name}</span>
+                            </div>
+                            <div>
+                                <button class="btn btn-action" onclick="manageService('start', '${name}')">Start</button>
+                                <button class="btn btn-danger" onclick="manageService('stop', '${name}')">Stop</button>
+                                <button class="btn btn-action" onclick="manageService('restart', '${name}')">Restart</button>
+                            </div>
+                        </div>
+                    `;
+                }
+                document.getElementById('services').innerHTML = html;
+            } catch (e) { document.getElementById('services').innerHTML = '<div class="loading">Failed to load</div>'; }
+        }
+
+        async function loadPipPackages() {
+            try {
+                const res = await fetch('/api/pip/list');
+                const data = await res.json();
+                let html = '';
+                for (const pkg of data.slice(0, 50)) {
+                    html += `<div class="pip-item">${pkg.name} <span style="color:#64748b">${pkg.version}</span></div>`;
+                }
+                document.getElementById('pip-list').innerHTML = html || '<div class="loading">No packages found</div>';
+            } catch (e) { document.getElementById('pip-list').innerHTML = '<div class="loading">Failed to load</div>'; }
+        }
+
+        async function installSoftware(software, btn) {
+            btn.disabled = true;
+            btn.textContent = 'Installing...';
+            try {
+                const res = await fetch(`/api/install/${software}`, { method: 'POST' });
+                const data = await res.json();
+                showToast(data.message, data.success ? 'success' : 'error');
+                loadSoftwareStatus();
+            } catch (e) { showToast('Installation failed', 'error'); }
+        }
+
+        async function manageService(action, service) {
+            try {
+                const res = await fetch(`/api/service/${action}/${service}`, { method: 'POST' });
+                const data = await res.json();
+                showToast(data.message, 'success');
+                loadServices();
+            } catch (e) { showToast('Action failed', 'error'); }
+        }
+
+        async function installPip() {
+            const pkg = document.getElementById('pip-package').value.trim();
+            if (!pkg) return;
+            try {
+                const res = await fetch('/api/pip/install', {
+                    method: 'POST',
+                    headers: { 'Content-Type': 'application/json' },
+                    body: JSON.stringify({ package: pkg })
+                });
+                const data = await res.json();
+                showToast(data.message, data.success ? 'success' : 'error');
+                document.getElementById('pip-package').value = '';
+                loadPipPackages();
+            } catch (e) { showToast('Installation failed', 'error'); }
+        }
+
+        function loadAll() {
+            loadSystemInfo();
+            loadSoftwareStatus();
+            loadServices();
+            loadPipPackages();
+        }
+
+        loadAll();
+    </script>
+</body>
+</html>
