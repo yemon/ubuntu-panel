@@ -62,6 +62,12 @@ A modern, web-based control panel for managing Ubuntu VPS servers. Built with Fl
   - Website files from `/var/www` — choose specific sites (sizes shown) since running sites may be large
 - List, download, and delete previously created backups
 
+### 📥 Import & Restore
+- Upload a backup `.tar.gz` (exported from this tool) to restore on the same or a **different** server
+- Inspects the archive first and shows what it contains (source host, site configs, SSL certificates, website files with sizes)
+- Choose exactly what to restore: Nginx configs, Apache configs, SSL certificates, and specific website directories
+- Web server config is syntax-tested before reload; SSL certificates are domain-bound so they keep working on a new server/IP (point DNS to it and verify renewal)
+
 ## 🚀 Quick Start
 
 ### Prerequisites
@@ -246,6 +252,9 @@ python app.py
 - `POST /api/backup/create` - Create a full backup (options: SSL certs, website files, selected sites)
 - `GET /api/backup/download/<filename>` - Download a saved backup
 - `DELETE /api/backup/delete/<filename>` - Delete a saved backup
+- `POST /api/import/upload` - Upload a backup archive and inspect its contents
+- `POST /api/import/apply` - Restore selected parts of an uploaded archive
+- `POST /api/import/cancel` - Discard an uploaded archive without restoring
 
 ## 🤝 Contributing
 

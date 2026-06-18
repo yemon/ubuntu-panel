@@ -33,6 +33,10 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 ## [Unreleased]
 
 ### Added
+- Import / Restore: upload a backup `.tar.gz` and restore site configs, SSL certificates, and selected website files (for migrating to a new server)
+- Import inspects the archive (source host, configs, certbot domains, website sizes) before restoring, with per-item selection
+- Web server config is syntax-tested before reload during restore
+- Import API endpoints: `/api/import/upload`, `/api/import/apply`, `/api/import/cancel`
 - Session-based login page protecting all pages and API endpoints
 - Credentials and session secret loaded from a `.env` file (`ADMIN_USERNAME`, `ADMIN_PASSWORD`, `SECRET_KEY`)
 - `.env.example` template and `/login` + `/logout` routes; logout button in the dashboard

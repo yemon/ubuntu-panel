@@ -730,5 +730,168 @@ def backup_delete(filename):
     return jsonify({"success": True, "message": "Backup deleted"})
 
 
+# ============ IMPORT / RESTORE ============
+
+IMPORTS_DIR = "/var/tmp/vps-manager-imports"
+
+
+def _ls(path):
+    """List entries of a (possibly root-owned) directory, ignoring errors."""
+    out = run_cmd(f"sudo ls -1 {path} 2>/dev/null")
+    return [x for x in out.split("\n") if x] if out else []
+
+
+def _import_root(token):
+    """Resolve an import token to the extracted archive's content directory."""
+    if not token or not re.match(r"^[A-Za-z0-9_]+$", token):
+        return None
+    staging = os.path.join(IMPORTS_DIR, token)
+    if not os.path.isdir(staging):
+        return None
+    # Archives created by this tool contain a single top-level directory.
+    entries = [e for e in _ls(staging) if not e.startswith(".")]
+    if len(entries) == 1 and run_cmd(f"sudo test -d {staging}/{entries[0]} && echo y") == "y":
+        return os.path.join(staging, entries[0])
+    return staging
+
+
+@app.route("/api/import/upload", methods=["POST"])
+def import_upload():
+    """Receive a backup archive, extract it, and report what it contains."""
+    if "file" not in request.files:
+        return jsonify({"success": False, "message": "No file uploaded"}), 400
+    f = request.files["file"]
+    if not f.filename:
+        return jsonify({"success": False, "message": "No file selected"}), 400
+    if not f.filename.endswith(".tar.gz"):
+        return jsonify({"success": False, "message": "File must be a .tar.gz archive"}), 400
+
+    token = "import_" + datetime.datetime.now().strftime("%Y%m%d_%H%M%S") + "_" + os.urandom(3).hex()
+    upload_path = f"/tmp/{token}.tar.gz"
+    f.save(upload_path)
+
+    # Validate it is a readable gzip tarball before doing anything with sudo.
+    if run_cmd(f"tar tzf {upload_path} >/dev/null 2>&1 && echo ok") != "ok":
+        run_cmd(f"rm -f {upload_path}")
+        return jsonify({"success": False, "message": "Invalid or corrupted .tar.gz archive"}), 400
+
+    staging = os.path.join(IMPORTS_DIR, token)
+    run_cmd(f"sudo mkdir -p {staging}")
+    run_cmd(f"sudo tar xzf {upload_path} -C {staging}")
+    run_cmd(f"rm -f {upload_path}")
+
+    root = _import_root(token)
+    if not root:
+        return jsonify({"success": False, "message": "Could not read archive contents"}), 400
+
+    manifest = {}
+    manifest_raw = run_cmd(f"sudo cat {root}/manifest.json 2>/dev/null")
+    if manifest_raw:
+        try:
+            manifest = json.loads(manifest_raw)
+        except ValueError:
+            manifest = {}
+
+    certbot_present = run_cmd(f"sudo test -d {root}/letsencrypt && echo yes") == "yes"
+    www_dirs = []
+    out = run_cmd(f"sudo du -sb {root}/www/* 2>/dev/null")
+    if out:
+        for line in out.splitlines():
+            parts = line.split("\t")
+            if len(parts) == 2 and parts[0].isdigit():
+                size = int(parts[0])
+                www_dirs.append({
+                    "name": os.path.basename(parts[1]),
+                    "bytes": size,
+                    "size": human_bytes(size),
+                })
+
+    return jsonify({
+        "success": True,
+        "token": token,
+        "manifest": manifest,
+        "nginx_configs": _ls(f"{root}/nginx/sites-available"),
+        "apache_configs": _ls(f"{root}/apache2/sites-available"),
+        "certbot": {
+            "present": certbot_present,
+            "domains": [d for d in _ls(f"{root}/letsencrypt/live") if d != "README"],
+        },
+        "www_dirs": www_dirs,
+    })
+
+
+@app.route("/api/import/apply", methods=["POST"])
+def import_apply():
+    """Restore selected parts of a previously uploaded backup archive."""
+    data = request.get_json() or {}
+    root = _import_root(data.get("token", ""))
+    if not root:
+        return jsonify({"success": False, "message": "Import session not found (re-upload the archive)"}), 400
+
+    selected_sites = data.get("sites", []) or []
+    results, warnings = [], []
+
+    if data.get("restore_nginx") and run_cmd(f"sudo test -d {root}/nginx/sites-available && echo y") == "y":
+        run_cmd("sudo mkdir -p /etc/nginx/sites-available /etc/nginx/sites-enabled")
+        run_cmd(f"sudo cp -a {root}/nginx/sites-available/. /etc/nginx/sites-available/")
+        if run_cmd(f"sudo test -d {root}/nginx/sites-enabled && echo y") == "y":
+            run_cmd(f"sudo cp -a {root}/nginx/sites-enabled/. /etc/nginx/sites-enabled/")
+        test = run_cmd("sudo nginx -t 2>&1")
+        if test and "successful" in test:
+            run_cmd("sudo systemctl reload nginx")
+            results.append("Nginx site configs restored")
+        else:
+            warnings.append(f"Nginx config test failed, not reloaded: {test}")
+
+    if data.get("restore_apache") and run_cmd(f"sudo test -d {root}/apache2/sites-available && echo y") == "y":
+        run_cmd("sudo mkdir -p /etc/apache2/sites-available /etc/apache2/sites-enabled")
+        run_cmd(f"sudo cp -a {root}/apache2/sites-available/. /etc/apache2/sites-available/")
+        if run_cmd(f"sudo test -d {root}/apache2/sites-enabled && echo y") == "y":
+            run_cmd(f"sudo cp -a {root}/apache2/sites-enabled/. /etc/apache2/sites-enabled/")
+        test = run_cmd("sudo apachectl configtest 2>&1")
+        if test and "Syntax OK" in test:
+            run_cmd("sudo systemctl reload apache2")
+            results.append("Apache site configs restored")
+        else:
+            warnings.append(f"Apache config test failed, not reloaded: {test}")
+
+    if data.get("restore_certbot") and run_cmd(f"sudo test -d {root}/letsencrypt && echo y") == "y":
+        run_cmd("sudo mkdir -p /etc/letsencrypt")
+        run_cmd(f"sudo cp -a {root}/letsencrypt/. /etc/letsencrypt/")
+        results.append("SSL certificates (Let's Encrypt) restored")
+
+    if data.get("restore_site_files") and run_cmd(f"sudo test -d {root}/www && echo y") == "y":
+        restored = []
+        for site in _ls(f"{root}/www"):
+            if selected_sites and site not in selected_sites:
+                continue
+            dest = f"/var/www/{site}"
+            run_cmd(f"sudo mkdir -p {dest}")
+            run_cmd(f"sudo cp -a {root}/www/{site}/. {dest}/")
+            run_cmd(f"sudo chown -R www-data:www-data {dest}")
+            restored.append(site)
+        if restored:
+            results.append(f"Website files restored: {', '.join(restored)}")
+
+    run_cmd(f"sudo rm -rf {os.path.join(IMPORTS_DIR, data.get('token', ''))}")
+
+    if not results and not warnings:
+        return jsonify({"success": False, "message": "Nothing was selected to restore"}), 400
+
+    message = "; ".join(results)
+    if warnings:
+        message = (message + " | " if message else "") + "Warnings: " + "; ".join(warnings)
+    return jsonify({"success": len(warnings) == 0, "message": message or "Restore completed"})
+
+
+@app.route("/api/import/cancel", methods=["POST"])
+def import_cancel():
+    """Discard an uploaded archive that was not applied."""
+    token = (request.get_json() or {}).get("token", "")
+    if token and re.match(r"^[A-Za-z0-9_]+$", token):
+        run_cmd(f"sudo rm -rf {os.path.join(IMPORTS_DIR, token)}")
+    return jsonify({"success": True})
+
+
 if __name__ == "__main__":
     app.run(host="0.0.0.0", port=5000, debug=True)

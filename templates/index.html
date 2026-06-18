@@ -177,6 +177,21 @@
                 </div>
 
                 <div class="card" style="grid-column: span 2;">
+                    <h2>Import / Restore Backup</h2>
+                    <p style="color:#94a3b8; font-size:0.85rem; margin-bottom:15px;">
+                        Upload a backup <code style="color:#38bdf8;">.tar.gz</code> exported from this tool to restore
+                        site configs, SSL certificates and website files — useful for migrating to a new server.
+                        SSL certificates are tied to the domain, not the IP, so they keep working on a new server (just
+                        point DNS to it and verify renewal).
+                    </p>
+                    <div class="form-group">
+                        <input type="file" id="import-file" accept=".gz,.tar.gz">
+                    </div>
+                    <button class="btn btn-install" style="width: 100%; padding: 12px;" onclick="analyzeImport(this)">Analyze Archive</button>
+                    <div id="import-details" style="margin-top:18px;"></div>
+                </div>
+
+                <div class="card" style="grid-column: span 2;">
                     <h2>Saved Backups</h2>
                     <div id="backups-list"><div class="loading">Loading...</div></div>
                 </div>
@@ -631,6 +646,100 @@
                 showToast(data.message, data.success ? 'success' : 'error');
                 loadBackupInfo();
             } catch (e) { showToast('Delete failed', 'error'); }
+        }
+
+        // ===== Import / Restore =====
+        let importToken = null;
+
+        async function analyzeImport(btn) {
+            const input = document.getElementById('import-file');
+            if (!input.files.length) { showToast('Choose a .tar.gz file first', 'error'); return; }
+            const file = input.files[0];
+            if (!file.name.endsWith('.tar.gz')) { showToast('File must be a .tar.gz archive', 'error'); return; }
+            const orig = btn.textContent;
+            btn.disabled = true; btn.textContent = 'Uploading...';
+            try {
+                const fd = new FormData();
+                fd.append('file', file);
+                const res = await fetch('/api/import/upload', { method: 'POST', body: fd });
+                const data = await res.json();
+                if (!data.success) { showToast(data.message, 'error'); }
+                else { importToken = data.token; renderImportDetails(data); }
+            } catch (e) { showToast('Upload failed', 'error'); }
+            btn.disabled = false; btn.textContent = orig;
+        }
+
+        function renderImportDetails(d) {
+            const m = d.manifest || {};
+            const opt = (id, label, checked, disabled) =>
+                `<div class="checkbox-group" style="margin-bottom:8px;"><input type="checkbox" id="${id}" ${checked ? 'checked' : ''} ${disabled ? 'disabled' : ''}><label for="${id}">${label}</label></div>`;
+            let html = '<div style="background:#0f172a; border-radius:8px; padding:15px;">';
+            html += '<h3 style="color:#94a3b8; font-size:0.9rem; margin-bottom:10px;">ARCHIVE CONTENTS</h3>';
+            if (m.system) {
+                const when = m.generated_at ? m.generated_at.replace('T', ' ').slice(0, 16) : '?';
+                html += `<div class="site-details" style="margin-bottom:12px;">From ${m.system.hostname || '?'} · ${m.system.os || ''} · created ${when}</div>`;
+            }
+            html += opt('imp-nginx', `Nginx site configs (${d.nginx_configs.length})`, d.nginx_configs.length > 0, d.nginx_configs.length === 0);
+            html += opt('imp-apache', `Apache site configs (${d.apache_configs.length})`, d.apache_configs.length > 0, d.apache_configs.length === 0);
+            html += opt('imp-certbot', `SSL certificates (${d.certbot.domains.length} domain(s))`, d.certbot.present, !d.certbot.present);
+            html += opt('imp-sitefiles', 'Website files (/var/www)', false, d.www_dirs.length === 0);
+            if (d.www_dirs.length) {
+                html += '<div style="margin:4px 0 8px 28px;"><div style="color:#94a3b8; font-size:0.8rem; margin-bottom:6px;">Sites (none checked = all):</div>';
+                for (const w of d.www_dirs) {
+                    html += `<div class="checkbox-group" style="margin-bottom:5px;"><input type="checkbox" class="imp-site-cb" value="${w.name}"><label>${w.name} <span style="color:#64748b">(${w.size})</span></label></div>`;
+                }
+                html += '</div>';
+            }
+            html += '<div style="display:flex; gap:10px; margin-top:12px;">';
+            html += '<button class="btn btn-install" style="flex:1; padding:11px;" onclick="applyImport(this)">Restore Selected</button>';
+            html += '<button class="btn btn-danger" style="padding:11px 18px;" onclick="cancelImport()">Cancel</button>';
+            html += '</div></div>';
+            document.getElementById('import-details').innerHTML = html;
+        }
+
+        async function applyImport(btn) {
+            if (!importToken) return;
+            if (!confirm('Restore selected items? Existing files with the same names will be overwritten.')) return;
+            btn.disabled = true; btn.textContent = 'Restoring...';
+            const payload = {
+                token: importToken,
+                restore_nginx: document.getElementById('imp-nginx').checked,
+                restore_apache: document.getElementById('imp-apache').checked,
+                restore_certbot: document.getElementById('imp-certbot').checked,
+                restore_site_files: document.getElementById('imp-sitefiles').checked,
+                sites: Array.from(document.querySelectorAll('.imp-site-cb:checked')).map(c => c.value)
+            };
+            try {
+                const res = await fetch('/api/import/apply', {
+                    method: 'POST',
+                    headers: { 'Content-Type': 'application/json' },
+                    body: JSON.stringify(payload)
+                });
+                const data = await res.json();
+                showToast(data.message, data.success ? 'success' : 'error');
+                if (data.success) {
+                    importToken = null;
+                    document.getElementById('import-details').innerHTML = '';
+                    document.getElementById('import-file').value = '';
+                    loadBackupInfo();
+                }
+            } catch (e) { showToast('Restore failed', 'error'); }
+            btn.disabled = false; btn.textContent = 'Restore Selected';
+        }
+
+        async function cancelImport() {
+            if (importToken) {
+                try {
+                    await fetch('/api/import/cancel', {
+                        method: 'POST',
+                        headers: { 'Content-Type': 'application/json' },
+                        body: JSON.stringify({ token: importToken })
+                    });
+                } catch (e) { /* best effort */ }
+            }
+            importToken = null;
+            document.getElementById('import-details').innerHTML = '';
+            document.getElementById('import-file').value = '';
         }
 
         function loadAll() {
