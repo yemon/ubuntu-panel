@@ -723,8 +723,7 @@
                 const syncEl = document.getElementById('sync-sites');
                 if (syncEl) syncEl.innerHTML = syncSel;
 
-                // MySQL database selection for full backup
-                const my = data.mysql || { available: false, databases: [] };
+                // MySQL database selection for full backup (reuses `my` from above)
                 let dbSel = '';
                 if (!my.available) {
                     dbSel = '<div class="loading">MySQL is not installed on this server.</div>';
