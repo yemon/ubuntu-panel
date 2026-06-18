@@ -562,6 +562,72 @@ def human_bytes(num):
     return f"{num:.1f} PB"
 
 
+# --- MySQL helpers ---
+# Credentials are optional: if MYSQL_USER is set (in .env) they are used,
+# otherwise we rely on root socket auth via sudo (the Ubuntu default).
+MYSQL_USER = os.environ.get("MYSQL_USER", "")
+MYSQL_PASSWORD = os.environ.get("MYSQL_PASSWORD", "")
+MYSQL_SYSTEM_DBS = {"information_schema", "performance_schema", "mysql", "sys"}
+_DB_RE = re.compile(r"^[A-Za-z0-9_-]+$")
+
+
+def mysql_available():
+    """True if mysqldump/mysql client tools are installed."""
+    return shutil.which("mysqldump") is not None and shutil.which("mysql") is not None
+
+
+def _mysql_auth(binary):
+    """Prefix a mysql/mysqldump invocation with credentials if configured."""
+    if MYSQL_USER:
+        return f"MYSQL_PWD={shlex.quote(MYSQL_PASSWORD)} {binary} -u {shlex.quote(MYSQL_USER)}"
+    return binary
+
+
+def _mysql_run(inner):
+    """Run a mysql-related command as root via sudo (so socket auth works)."""
+    return run_cmd_detailed(f"sudo bash -c {shlex.quote(inner)}")
+
+
+def list_mysql_databases():
+    """List user databases with sizes (excludes MySQL's own system schemas)."""
+    if not mysql_available():
+        return []
+    show = _mysql_run(f"{_mysql_auth('mysql')} -N -e 'SHOW DATABASES'")
+    if not show["success"]:
+        return []
+    names = [d for d in show["stdout"].splitlines() if d and d not in MYSQL_SYSTEM_DBS]
+    sizes = {}
+    sql = ("SELECT table_schema, ROUND(SUM(data_length+index_length)/1024/1024,1) "
+           "FROM information_schema.tables GROUP BY table_schema")
+    res = _mysql_run(f"{_mysql_auth('mysql')} -N -e {shlex.quote(sql)}")
+    if res["success"]:
+        for line in res["stdout"].splitlines():
+            p = line.split("\t")
+            if len(p) >= 2:
+                sizes[p[0]] = p[1]
+    return [{"name": n, "size": f"{sizes.get(n, '0')} MB"} for n in names]
+
+
+def _dump_database(db, dest):
+    """Dump a single database (incl. CREATE DATABASE) to a .sql file."""
+    inner = f"{_mysql_auth('mysqldump')} --databases {shlex.quote(db)} > {shlex.quote(dest)}"
+    return _mysql_run(inner)
+
+
+def _import_sql(sqlfile):
+    """Load a .sql dump back into MySQL."""
+    return _mysql_run(f"{_mysql_auth('mysql')} < {shlex.quote(sqlfile)}")
+
+
+def _db_exists(db):
+    res = _mysql_run(f"{_mysql_auth('mysql')} -N -e 'SHOW DATABASES'")
+    return res["success"] and db in res["stdout"].splitlines()
+
+
+def _drop_database(db):
+    return _mysql_run(f"{_mysql_auth('mysql')} -e {shlex.quote('DROP DATABASE IF EXISTS `' + db + '`')}")
+
+
 def list_certbot_domains():
     """List domains that have Let's Encrypt certificates."""
     out = run_cmd(f"sudo ls {LETSENCRYPT_DIR}/live 2>/dev/null")
@@ -676,6 +742,7 @@ def backup_info():
         "apache_site_count": len(get_apache_sites()) if os.path.exists(APACHE_SITES_AVAILABLE) else 0,
         "certbot": {"present": os.path.exists(LETSENCRYPT_DIR), "domains": list_certbot_domains()},
         "www_dirs": list_www_dirs(),
+        "mysql": {"available": mysql_available(), "databases": list_mysql_databases()},
         "backups": list_backups(),
     })
 
@@ -711,7 +778,9 @@ def backup_create():
     data = request.get_json() or {}
     include_certbot = bool(data.get("include_certbot", False))
     include_site_files = bool(data.get("include_site_files", False))
+    include_mysql = bool(data.get("include_mysql", False))
     selected_sites = data.get("sites", []) or []  # dir names under /var/www; empty = all
+    selected_dbs = data.get("mysql_databases", []) or []  # db names; empty = all
 
     ts = datetime.datetime.now().strftime("%Y%m%d_%H%M%S")
     name = f"backup_{ts}"
@@ -733,11 +802,22 @@ def backup_create():
                 run_cmd(f"sudo cp -a {d['path']} {staging}/www/{d['name']}")
                 included_sites.append(d["name"])
 
+    included_dbs = []
+    if include_mysql and mysql_available():
+        run_cmd(f"sudo mkdir -p {staging}/mysql")
+        for db in [d["name"] for d in list_mysql_databases()]:
+            if (not selected_dbs or db in selected_dbs) and _safe(db, _DB_RE):
+                res = _dump_database(db, f"{staging}/mysql/{db}.sql")
+                if res["success"]:
+                    included_dbs.append(db)
+
     _write_manifest(staging, build_manifest({
         "type": "full",
         "include_certbot": include_certbot,
         "include_site_files": include_site_files,
         "included_sites": included_sites,
+        "include_mysql": include_mysql,
+        "included_databases": included_dbs,
     }))
 
     archive = f"{BACKUP_DIR}/{name}.tar.gz"
@@ -755,6 +835,8 @@ def backup_create():
         parts.append("SSL certificates")
     if included_sites:
         parts.append(f"{len(included_sites)} website(s)")
+    if included_dbs:
+        parts.append(f"{len(included_dbs)} database(s)")
     return jsonify({
         "success": True,
         "message": f"Backup created ({human_bytes(st.st_size)}) including: {', '.join(parts)}.",
@@ -858,6 +940,8 @@ def import_upload():
                     "size": human_bytes(size),
                 })
 
+    mysql_dumps = [f[:-4] for f in _ls(f"{root}/mysql") if f.endswith(".sql")]
+
     return jsonify({
         "success": True,
         "token": token,
@@ -869,6 +953,7 @@ def import_upload():
             "domains": [d for d in _ls(f"{root}/letsencrypt/live") if d != "README"],
         },
         "www_dirs": www_dirs,
+        "mysql": {"available": mysql_available(), "databases": mysql_dumps},
     })
 
 
@@ -1033,6 +1118,48 @@ def import_apply():
                 steps.append(_step("Website files", "skipped", "No matching website directories were found in this archive."))
         else:
             steps.append(_step("Website files", "skipped", "No website files were found in this archive."))
+
+    # ---- MySQL databases ----
+    if data.get("restore_mysql"):
+        if not _dir_exists(f"{root}/mysql"):
+            steps.append(_step("MySQL databases", "skipped", "No database dumps were found in this archive."))
+        elif not mysql_available():
+            steps.append(_step("MySQL databases", "error",
+                               "MySQL client tools are not installed on this server, so the databases could not be "
+                               "restored. Install MySQL first, then re-run the import."))
+        else:
+            selected_dbs = data.get("databases", []) or []
+            run_cmd(f"sudo mkdir -p {rollback_dir}/mysql")
+            restored, failed = [], []
+            for f in _ls(f"{root}/mysql"):
+                if not f.endswith(".sql"):
+                    continue
+                db = f[:-4]
+                if selected_dbs and db not in selected_dbs:
+                    continue
+                if not _safe(db, _DB_RE):
+                    failed.append(f"{db} (invalid database name)")
+                    continue
+                existed = _db_exists(db)
+                if existed:
+                    _dump_database(db, f"{rollback_dir}/mysql/{db}.sql")  # snapshot for rollback
+                res = _import_sql(f"{root}/mysql/{f}")
+                if res["success"]:
+                    restored.append(db)
+                else:
+                    _drop_database(db)
+                    if existed:
+                        _import_sql(f"{rollback_dir}/mysql/{db}.sql")  # rollback
+                    failed.append(f"{db} ({_tail(res['stderr']) or 'import error'})")
+            if restored:
+                steps.append(_step("MySQL databases", "success",
+                                   f"Imported {len(restored)} database(s): {', '.join(restored)}. "
+                                   f"Existing tables were dropped and recreated from the dump."))
+            if failed:
+                steps.append(_step("MySQL databases", "error",
+                                   f"Failed and ROLLED BACK for: {'; '.join(failed)}."))
+            if not restored and not failed:
+                steps.append(_step("MySQL databases", "skipped", "No matching database dumps were found in this archive."))
 
     # Clean up staging + rollback (system is already in a consistent state).
     run_cmd(f"sudo rm -rf {os.path.join(IMPORTS_DIR, token)}")

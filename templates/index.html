@@ -173,6 +173,13 @@
                         </div>
                     </div>
                     <div id="sitefiles-selection" style="display:none; margin: 0 0 15px; padding: 12px; background:#0f172a; border-radius:8px;"></div>
+                    <div class="form-group">
+                        <div class="checkbox-group">
+                            <input type="checkbox" id="backup-mysql" onchange="toggleMysql(this.checked)">
+                            <label for="backup-mysql">Include MySQL databases (via mysqldump)</label>
+                        </div>
+                    </div>
+                    <div id="mysql-selection" style="display:none; margin: 0 0 15px; padding: 12px; background:#0f172a; border-radius:8px;"></div>
                     <button class="btn btn-install" style="width: 100%; padding: 12px;" onclick="createFullBackup(this)">Create Backup</button>
                 </div>
 
@@ -624,6 +631,8 @@
                 ov += `<div class="software-item"><div class="software-info"><div class="software-name">Nginx</div><div class="software-version">${data.nginx_site_count} site config(s)</div></div>${badge(ng.installed ? (ng.running ? 'Running' : 'Installed') : 'Not installed', ng.installed)}</div>`;
                 ov += `<div class="software-item"><div class="software-info"><div class="software-name">Apache</div><div class="software-version">${data.apache_site_count} site config(s)</div></div>${badge(ap.installed ? (ap.running ? 'Running' : 'Installed') : 'Not installed', ap.installed)}</div>`;
                 ov += `<div class="software-item"><div class="software-info"><div class="software-name">SSL / Certbot</div><div class="software-version">${cb.domains.length} certificate(s)</div></div>${badge(cb.present ? 'Present' : 'None', cb.present)}</div>`;
+                const my = data.mysql || { available: false, databases: [] };
+                ov += `<div class="software-item"><div class="software-info"><div class="software-name">MySQL</div><div class="software-version">${my.databases.length} database(s)</div></div>${badge(my.available ? 'Available' : 'Not installed', my.available)}</div>`;
                 ov += '</div>';
                 document.getElementById('backup-overview').innerHTML = ov;
 
@@ -648,6 +657,21 @@
                 }
                 const syncEl = document.getElementById('sync-sites');
                 if (syncEl) syncEl.innerHTML = syncSel;
+
+                // MySQL database selection for full backup
+                const my = data.mysql || { available: false, databases: [] };
+                let dbSel = '';
+                if (!my.available) {
+                    dbSel = '<div class="loading">MySQL is not installed on this server.</div>';
+                } else if (my.databases.length) {
+                    dbSel = '<div style="color:#94a3b8; font-size:0.85rem; margin-bottom:10px;">Choose databases to include (none checked = all):</div>';
+                    for (const db of my.databases) {
+                        dbSel += `<div class="checkbox-group" style="margin-bottom:6px;"><input type="checkbox" class="mysql-db-cb" value="${db.name}"><label>${db.name} <span style="color:#64748b">(${db.size})</span></label></div>`;
+                    }
+                } else {
+                    dbSel = '<div class="loading">No user databases found.</div>';
+                }
+                document.getElementById('mysql-selection').innerHTML = dbSel;
 
                 let bl = '';
                 if (data.backups.length) {
@@ -677,6 +701,10 @@
             document.getElementById('sitefiles-selection').style.display = checked ? 'block' : 'none';
         }
 
+        function toggleMysql(checked) {
+            document.getElementById('mysql-selection').style.display = checked ? 'block' : 'none';
+        }
+
         function downloadConfigs(btn) {
             const orig = btn.textContent;
             btn.disabled = true;
@@ -691,7 +719,9 @@
             const payload = {
                 include_certbot: document.getElementById('backup-certbot').checked,
                 include_site_files: document.getElementById('backup-sitefiles').checked,
-                sites: Array.from(document.querySelectorAll('.sitefile-cb:checked')).map(c => c.value)
+                include_mysql: document.getElementById('backup-mysql').checked,
+                sites: Array.from(document.querySelectorAll('.sitefile-cb:checked')).map(c => c.value),
+                mysql_databases: Array.from(document.querySelectorAll('.mysql-db-cb:checked')).map(c => c.value)
             };
             try {
                 const res = await fetch('/api/backup/create', {
@@ -763,6 +793,16 @@
                 }
                 html += '</div>';
             }
+            const my = d.mysql || { available: false, databases: [] };
+            const dbLabel = `MySQL databases (${my.databases.length})${my.available ? '' : ' — MySQL not installed here'}`;
+            html += opt('imp-mysql', dbLabel, my.databases.length > 0 && my.available, my.databases.length === 0 || !my.available);
+            if (my.databases.length) {
+                html += '<div style="margin:4px 0 8px 28px;"><div style="color:#94a3b8; font-size:0.8rem; margin-bottom:6px;">Databases (none checked = all). Importing overwrites existing tables:</div>';
+                for (const db of my.databases) {
+                    html += `<div class="checkbox-group" style="margin-bottom:5px;"><input type="checkbox" class="imp-db-cb" value="${db}" ${my.available ? '' : 'disabled'}><label>${db}</label></div>`;
+                }
+                html += '</div>';
+            }
             html += '<div style="display:flex; gap:10px; margin-top:12px;">';
             html += '<button class="btn btn-install" style="flex:1; padding:11px;" onclick="applyImport(this)">Restore Selected</button>';
             html += '<button class="btn btn-danger" style="padding:11px 18px;" onclick="cancelImport()">Cancel</button>';
@@ -780,7 +820,9 @@
                 restore_apache: document.getElementById('imp-apache').checked,
                 restore_certbot: document.getElementById('imp-certbot').checked,
                 restore_site_files: document.getElementById('imp-sitefiles').checked,
-                sites: Array.from(document.querySelectorAll('.imp-site-cb:checked')).map(c => c.value)
+                restore_mysql: document.getElementById('imp-mysql').checked,
+                sites: Array.from(document.querySelectorAll('.imp-site-cb:checked')).map(c => c.value),
+                databases: Array.from(document.querySelectorAll('.imp-db-cb:checked')).map(c => c.value)
             };
             try {
                 const res = await fetch('/api/import/apply', {

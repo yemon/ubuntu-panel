@@ -60,12 +60,14 @@ A modern, web-based control panel for managing Ubuntu VPS servers. Built with Fl
 - **Full backup** with options for what to include:
   - SSL certificates (Let's Encrypt / certbot)
   - Website files from `/var/www` — choose specific sites (sizes shown) since running sites may be large
+  - MySQL databases via `mysqldump` — choose specific databases (sizes shown)
 - List, download, and delete previously created backups
 
 ### 📥 Import & Restore
 - Upload a backup `.tar.gz` (exported from this tool) to restore on the same or a **different** server
 - Inspects the archive first and shows what it contains (source host, site configs, SSL certificates, website files with sizes)
-- Choose exactly what to restore: Nginx configs, Apache configs, SSL certificates, and specific website directories
+- Choose exactly what to restore: Nginx configs, Apache configs, SSL certificates, specific website directories, and MySQL databases
+- MySQL databases are imported with `mysqldump` (existing tables dropped & recreated); each database is snapshotted first and rolled back if its import fails
 - Web server config is syntax-tested before reload; SSL certificates are domain-bound so they keep working on a new server/IP (point DNS to it and verify renewal)
 
 ### 🔁 Server-to-Server Transfer (rsync)

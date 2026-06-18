@@ -33,6 +33,9 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 ## [Unreleased]
 
 ### Added
+- MySQL database backup and restore: dump selected databases (with sizes) into a backup and import them again, including in the import/restore flow
+- MySQL restore snapshots each existing database first and rolls it back if the import fails
+- Optional `MYSQL_USER`/`MYSQL_PASSWORD` in `.env`; falls back to root socket auth via sudo
 - Server-to-server transfer via rsync over SSH: copy large websites, configs, and SSL certificates directly to another server (only changed data sent, resumable)
 - Background transfer jobs with live progress log, connection test, dry-run, `--delete` mirror, key/password auth, and cancel
 - Input validation (allowlist patterns) on rsync host/user/path/site parameters to prevent shell injection
