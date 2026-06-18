@@ -84,6 +84,7 @@
             <button class="tab active" onclick="switchTab('dashboard')">Dashboard</button>
             <button class="tab" onclick="switchTab('domains')">Domains & Sites</button>
             <button class="tab" onclick="switchTab('software')">Software</button>
+            <button class="tab" onclick="switchTab('backup')">Backup</button>
         </div>
         
         <!-- Dashboard Tab -->
@@ -136,8 +137,50 @@
                 </div>
             </div>
         </div>
+
+        <!-- Backup Tab -->
+        <div id="tab-backup" class="tab-content">
+            <div class="grid">
+                <div class="card" style="grid-column: span 2;">
+                    <div style="display: flex; justify-content: space-between; align-items: center; margin-bottom: 15px;">
+                        <h2 style="margin: 0;">Server Backup &amp; Export</h2>
+                        <button class="btn btn-install" onclick="downloadConfigs(this)">⬇ Download All Site Configs</button>
+                    </div>
+                    <p style="color:#94a3b8; font-size:0.85rem; margin-bottom:15px;">
+                        The one-click download bundles every Nginx/Apache site config plus a single
+                        <code style="color:#38bdf8;">manifest.json</code> describing the server, into one
+                        <code style="color:#38bdf8;">.tar.gz</code>. Use the full backup below to also include SSL
+                        certificates and website files.
+                    </p>
+                    <div id="backup-overview"><div class="loading">Loading...</div></div>
+                </div>
+
+                <div class="card" style="grid-column: span 2;">
+                    <h2>Create Full Backup</h2>
+                    <div class="form-group">
+                        <div class="checkbox-group">
+                            <input type="checkbox" id="backup-certbot" checked>
+                            <label for="backup-certbot">Include SSL certificates (Let's Encrypt / certbot — contains private keys)</label>
+                        </div>
+                    </div>
+                    <div class="form-group">
+                        <div class="checkbox-group">
+                            <input type="checkbox" id="backup-sitefiles" onchange="toggleSiteFiles(this.checked)">
+                            <label for="backup-sitefiles">Include website files from /var/www (may be large)</label>
+                        </div>
+                    </div>
+                    <div id="sitefiles-selection" style="display:none; margin: 0 0 15px; padding: 12px; background:#0f172a; border-radius:8px;"></div>
+                    <button class="btn btn-install" style="width: 100%; padding: 12px;" onclick="createFullBackup(this)">Create Backup</button>
+                </div>
+
+                <div class="card" style="grid-column: span 2;">
+                    <h2>Saved Backups</h2>
+                    <div id="backups-list"><div class="loading">Loading...</div></div>
+                </div>
+            </div>
+        </div>
     </div>
-    
+
     <!-- Create Site Modal -->
     <div id="create-site-modal" class="modal">
         <div class="modal-content">
@@ -227,6 +270,7 @@
             document.querySelector(`[onclick="switchTab('${tab}')"]`).classList.add('active');
             document.getElementById(`tab-${tab}`).classList.add('active');
             if (tab === 'domains') loadWebserverInfo();
+            if (tab === 'backup') loadBackupInfo();
         }
 
         function openModal(id) { document.getElementById(id).classList.add('active'); }
@@ -487,6 +531,103 @@
                 document.getElementById('pip-package').value = '';
                 loadPipPackages();
             } catch (e) { showToast('Installation failed', 'error'); }
+        }
+
+        // ===== Backup =====
+        async function loadBackupInfo() {
+            try {
+                const res = await fetch('/api/backup/info');
+                const data = await res.json();
+
+                const ng = data.servers.nginx, ap = data.servers.apache, cb = data.certbot;
+                const badge = (s, ok) => `<span class="status-badge ${ok ? 'status-installed' : 'status-missing'}">${s}</span>`;
+                let ov = '<div style="display:grid; grid-template-columns:repeat(auto-fit,minmax(220px,1fr)); gap:10px;">';
+                ov += `<div class="software-item"><div class="software-info"><div class="software-name">Nginx</div><div class="software-version">${data.nginx_site_count} site config(s)</div></div>${badge(ng.installed ? (ng.running ? 'Running' : 'Installed') : 'Not installed', ng.installed)}</div>`;
+                ov += `<div class="software-item"><div class="software-info"><div class="software-name">Apache</div><div class="software-version">${data.apache_site_count} site config(s)</div></div>${badge(ap.installed ? (ap.running ? 'Running' : 'Installed') : 'Not installed', ap.installed)}</div>`;
+                ov += `<div class="software-item"><div class="software-info"><div class="software-name">SSL / Certbot</div><div class="software-version">${cb.domains.length} certificate(s)</div></div>${badge(cb.present ? 'Present' : 'None', cb.present)}</div>`;
+                ov += '</div>';
+                document.getElementById('backup-overview').innerHTML = ov;
+
+                let sel = '<div style="color:#94a3b8; font-size:0.85rem; margin-bottom:10px;">Choose which sites to include (leave all unchecked to include every site):</div>';
+                if (data.www_dirs.length) {
+                    for (const d of data.www_dirs) {
+                        sel += `<div class="checkbox-group" style="margin-bottom:6px;"><input type="checkbox" class="sitefile-cb" value="${d.name}"><label>${d.name} <span style="color:#64748b">(${d.size})</span></label></div>`;
+                    }
+                } else {
+                    sel = '<div class="loading">No website directories found in /var/www</div>';
+                }
+                document.getElementById('sitefiles-selection').innerHTML = sel;
+
+                let bl = '';
+                if (data.backups.length) {
+                    for (const b of data.backups) {
+                        bl += `
+                            <div class="site-item">
+                                <div class="site-info">
+                                    <div class="site-domain">${b.name}</div>
+                                    <div class="site-details">${b.size} · ${b.created}</div>
+                                </div>
+                                <div class="site-actions">
+                                    <button class="btn btn-action" onclick="downloadBackup('${b.name}')">Download</button>
+                                    <button class="btn btn-danger" onclick="deleteBackup('${b.name}')">Delete</button>
+                                </div>
+                            </div>`;
+                    }
+                } else {
+                    bl = '<div class="loading">No backups yet</div>';
+                }
+                document.getElementById('backups-list').innerHTML = bl;
+            } catch (e) {
+                document.getElementById('backup-overview').innerHTML = '<div class="loading">Failed to load</div>';
+            }
+        }
+
+        function toggleSiteFiles(checked) {
+            document.getElementById('sitefiles-selection').style.display = checked ? 'block' : 'none';
+        }
+
+        function downloadConfigs(btn) {
+            const orig = btn.textContent;
+            btn.disabled = true;
+            btn.textContent = 'Preparing...';
+            window.location = '/api/backup/configs';
+            setTimeout(() => { btn.disabled = false; btn.textContent = orig; }, 4000);
+        }
+
+        async function createFullBackup(btn) {
+            btn.disabled = true;
+            btn.textContent = 'Creating backup...';
+            const payload = {
+                include_certbot: document.getElementById('backup-certbot').checked,
+                include_site_files: document.getElementById('backup-sitefiles').checked,
+                sites: Array.from(document.querySelectorAll('.sitefile-cb:checked')).map(c => c.value)
+            };
+            try {
+                const res = await fetch('/api/backup/create', {
+                    method: 'POST',
+                    headers: { 'Content-Type': 'application/json' },
+                    body: JSON.stringify(payload)
+                });
+                const data = await res.json();
+                showToast(data.message, data.success ? 'success' : 'error');
+                if (data.success) loadBackupInfo();
+            } catch (e) { showToast('Backup failed', 'error'); }
+            btn.disabled = false;
+            btn.textContent = 'Create Backup';
+        }
+
+        function downloadBackup(name) {
+            window.location = '/api/backup/download/' + encodeURIComponent(name);
+        }
+
+        async function deleteBackup(name) {
+            if (!confirm('Delete backup ' + name + '?')) return;
+            try {
+                const res = await fetch('/api/backup/delete/' + encodeURIComponent(name), { method: 'DELETE' });
+                const data = await res.json();
+                showToast(data.message, data.success ? 'success' : 'error');
+                loadBackupInfo();
+            } catch (e) { showToast('Delete failed', 'error'); }
         }
 
         function loadAll() {

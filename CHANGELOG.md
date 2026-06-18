@@ -32,11 +32,20 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Added
+- Backup & Export tab with full server backup support
+- One-click download of all Nginx/Apache site configs as a single `.tar.gz`
+- Every backup includes a `manifest.json` describing the server (web servers, sites, SSL, system info)
+- Optional inclusion of Let's Encrypt / certbot SSL certificates
+- Optional inclusion of website files from `/var/www`, with per-site selection and size display
+- Saved backups list with download and delete actions
+- Backup API endpoints: `/api/backup/info`, `/api/backup/configs`, `/api/backup/create`, `/api/backup/download/<file>`, `/api/backup/delete/<file>`
+
 ### Planned
 - User authentication system
 - Multi-user support with roles
 - Database management interface
-- Backup and restore functionality
+- Backup restore (re-apply an exported backup)
 - Cron job management
 - Log viewer
 - Resource usage graphs

@@ -1,9 +1,10 @@
-from flask import Flask, render_template, jsonify, request
+from flask import Flask, render_template, jsonify, request, send_file, abort
 import subprocess
 import shutil
 import os
 import re
 import json
+import datetime
 
 app = Flask(__name__)
 
@@ -444,6 +445,234 @@ def create_site():
             run_cmd(f"sudo certbot --apache -d {domain} --non-interactive --agree-tos --register-unsafely-without-email")
     
     return jsonify({"success": True, "message": f"Site {domain} created successfully"})
+
+# ============ BACKUP / EXPORT ============
+
+BACKUP_DIR = "/var/backups/vps-manager"
+NGINX_CONFIG_DIR = "/etc/nginx"
+APACHE_CONFIG_DIR = "/etc/apache2"
+LETSENCRYPT_DIR = "/etc/letsencrypt"
+WWW_DIR = "/var/www"
+
+
+def human_bytes(num):
+    """Format a byte count into a human readable string."""
+    num = float(num)
+    for unit in ["B", "KB", "MB", "GB", "TB"]:
+        if abs(num) < 1024.0:
+            return f"{num:.1f} {unit}"
+        num /= 1024.0
+    return f"{num:.1f} PB"
+
+
+def list_certbot_domains():
+    """List domains that have Let's Encrypt certificates."""
+    out = run_cmd(f"sudo ls {LETSENCRYPT_DIR}/live 2>/dev/null")
+    if not out:
+        return []
+    return [d for d in out.split() if d != "README"]
+
+
+def list_www_dirs():
+    """List website directories under /var/www with their sizes."""
+    dirs = []
+    out = run_cmd(f"sudo du -sb {WWW_DIR}/* 2>/dev/null")
+    if out:
+        for line in out.splitlines():
+            parts = line.split("\t")
+            if len(parts) == 2 and parts[0].isdigit():
+                size = int(parts[0])
+                dirs.append({
+                    "name": os.path.basename(parts[1]),
+                    "path": parts[1],
+                    "bytes": size,
+                    "size": human_bytes(size),
+                })
+    return dirs
+
+
+def list_backups():
+    """List previously created backup archives."""
+    backups = []
+    if os.path.exists(BACKUP_DIR):
+        for f in sorted(os.listdir(BACKUP_DIR), reverse=True):
+            if f.endswith(".tar.gz"):
+                path = os.path.join(BACKUP_DIR, f)
+                try:
+                    st = os.stat(path)
+                except OSError:
+                    continue
+                backups.append({
+                    "name": f,
+                    "bytes": st.st_size,
+                    "size": human_bytes(st.st_size),
+                    "created": datetime.datetime.fromtimestamp(st.st_mtime).strftime("%Y-%m-%d %H:%M"),
+                })
+    return backups
+
+
+def build_manifest(options=None):
+    """Build the single descriptive config file that travels inside a backup."""
+    servers = detect_web_server()
+    return {
+        "tool": "VPS Manager Backup",
+        "version": 1,
+        "generated_at": datetime.datetime.now().isoformat(),
+        "system": {
+            "hostname": run_cmd("hostname") or "Unknown",
+            "os": run_cmd("lsb_release -d | cut -f2") or "Unknown",
+            "kernel": run_cmd("uname -r") or "Unknown",
+            "ip": run_cmd("hostname -I | awk '{print $1}'") or "Unknown",
+        },
+        "web_servers": {
+            "nginx": {"installed": os.path.exists(NGINX_CONFIG_DIR), "running": servers["nginx"]},
+            "apache": {"installed": os.path.exists(APACHE_CONFIG_DIR), "running": servers["apache"]},
+        },
+        "nginx_sites": get_nginx_sites() if os.path.exists(NGINX_SITES_AVAILABLE) else [],
+        "apache_sites": get_apache_sites() if os.path.exists(APACHE_SITES_AVAILABLE) else [],
+        "ssl": {"certbot": os.path.exists(LETSENCRYPT_DIR), "certificates": list_certbot_domains()},
+        "options": options or {},
+    }
+
+
+def _copy_configs(staging):
+    """Copy the active web server config trees into a staging directory."""
+    copied = []
+    if os.path.exists(NGINX_CONFIG_DIR):
+        run_cmd(f"sudo cp -a {NGINX_CONFIG_DIR} {staging}/nginx")
+        copied.append("nginx")
+    if os.path.exists(APACHE_CONFIG_DIR):
+        run_cmd(f"sudo cp -a {APACHE_CONFIG_DIR} {staging}/apache2")
+        copied.append("apache2")
+    return copied
+
+
+def _write_manifest(staging, manifest):
+    """Write the manifest JSON into a (possibly root-owned) staging directory."""
+    tmp = f"/tmp/manifest_{os.getpid()}.json"
+    with open(tmp, "w") as fh:
+        json.dump(manifest, fh, indent=2)
+    run_cmd(f"sudo mv {tmp} {staging}/manifest.json")
+
+
+def _safe_backup_path(filename):
+    """Resolve a user-supplied backup name to a safe path inside BACKUP_DIR."""
+    base = os.path.basename(filename)
+    if not base.endswith(".tar.gz"):
+        return None
+    path = os.path.join(BACKUP_DIR, base)
+    if not os.path.isfile(path):
+        return None
+    return path
+
+
+@app.route("/api/backup/info")
+def backup_info():
+    """Summarise what can be backed up so the UI can offer options."""
+    servers = detect_web_server()
+    return jsonify({
+        "servers": {
+            "nginx": {"installed": os.path.exists(NGINX_CONFIG_DIR), "running": servers["nginx"]},
+            "apache": {"installed": os.path.exists(APACHE_CONFIG_DIR), "running": servers["apache"]},
+        },
+        "nginx_site_count": len(get_nginx_sites()) if os.path.exists(NGINX_SITES_AVAILABLE) else 0,
+        "apache_site_count": len(get_apache_sites()) if os.path.exists(APACHE_SITES_AVAILABLE) else 0,
+        "certbot": {"present": os.path.exists(LETSENCRYPT_DIR), "domains": list_certbot_domains()},
+        "www_dirs": list_www_dirs(),
+        "backups": list_backups(),
+    })
+
+
+@app.route("/api/backup/configs")
+def backup_configs():
+    """One-click: build and stream a single archive of all site configs + manifest."""
+    ts = datetime.datetime.now().strftime("%Y%m%d_%H%M%S")
+    name = f"site-configs_{ts}"
+    staging = f"/tmp/{name}"
+    archive = f"/tmp/{name}.tar.gz"
+
+    run_cmd(f"sudo rm -rf {staging}")
+    run_cmd(f"sudo mkdir -p {staging}")
+    _copy_configs(staging)
+    _write_manifest(staging, build_manifest({"type": "configs-only"}))
+    run_cmd(f"sudo tar czf {archive} -C /tmp {name}")
+    run_cmd(f"sudo chmod 644 {archive}")
+    run_cmd(f"sudo rm -rf {staging}")
+
+    if not os.path.exists(archive):
+        return jsonify({"success": False, "message": "Failed to build configs archive"}), 500
+    return send_file(archive, as_attachment=True, download_name=f"{name}.tar.gz")
+
+
+@app.route("/api/backup/create", methods=["POST"])
+def backup_create():
+    """Create a full backup with the requested options and store it for download."""
+    data = request.get_json() or {}
+    include_certbot = bool(data.get("include_certbot", False))
+    include_site_files = bool(data.get("include_site_files", False))
+    selected_sites = data.get("sites", []) or []  # dir names under /var/www; empty = all
+
+    ts = datetime.datetime.now().strftime("%Y%m%d_%H%M%S")
+    name = f"backup_{ts}"
+    run_cmd(f"sudo mkdir -p {BACKUP_DIR}")
+    staging = f"{BACKUP_DIR}/{name}"
+    run_cmd(f"sudo rm -rf {staging}")
+    run_cmd(f"sudo mkdir -p {staging}")
+
+    _copy_configs(staging)
+
+    if include_certbot and os.path.exists(LETSENCRYPT_DIR):
+        run_cmd(f"sudo cp -a {LETSENCRYPT_DIR} {staging}/letsencrypt")
+
+    included_sites = []
+    if include_site_files:
+        run_cmd(f"sudo mkdir -p {staging}/www")
+        for d in list_www_dirs():
+            if not selected_sites or d["name"] in selected_sites:
+                run_cmd(f"sudo cp -a {d['path']} {staging}/www/{d['name']}")
+                included_sites.append(d["name"])
+
+    _write_manifest(staging, build_manifest({
+        "type": "full",
+        "include_certbot": include_certbot,
+        "include_site_files": include_site_files,
+        "included_sites": included_sites,
+    }))
+
+    archive = f"{BACKUP_DIR}/{name}.tar.gz"
+    run_cmd(f"sudo tar czf {archive} -C {BACKUP_DIR} {name}")
+    run_cmd(f"sudo chmod 644 {archive}")
+    run_cmd(f"sudo rm -rf {staging}")
+
+    if not os.path.exists(archive):
+        return jsonify({"success": False, "message": "Failed to create backup"}), 500
+    st = os.stat(archive)
+    return jsonify({
+        "success": True,
+        "message": f"Backup created ({human_bytes(st.st_size)})",
+        "name": f"{name}.tar.gz",
+        "size": human_bytes(st.st_size),
+    })
+
+
+@app.route("/api/backup/download/<filename>")
+def backup_download(filename):
+    """Download a previously created backup archive."""
+    path = _safe_backup_path(filename)
+    if not path:
+        abort(404)
+    return send_file(path, as_attachment=True, download_name=os.path.basename(path))
+
+
+@app.route("/api/backup/delete/<filename>", methods=["DELETE"])
+def backup_delete(filename):
+    """Delete a stored backup archive."""
+    path = _safe_backup_path(filename)
+    if not path:
+        return jsonify({"success": False, "message": "Backup not found"}), 404
+    run_cmd(f"sudo rm -f {path}")
+    return jsonify({"success": True, "message": "Backup deleted"})
+
 
 if __name__ == "__main__":
     app.run(host="0.0.0.0", port=5000, debug=True)

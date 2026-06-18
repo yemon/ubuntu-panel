@@ -53,6 +53,15 @@ A modern, web-based control panel for managing Ubuntu VPS servers. Built with Fl
 - Real-time service status monitoring
 - Support for Apache, Nginx, MySQL, PostgreSQL, Redis, Docker
 
+### 💾 Backup & Export
+- **One-click download** of all Nginx/Apache site configs in a single `.tar.gz`
+- Automatically detects whether the server runs Nginx and/or Apache
+- Every archive includes a single `manifest.json` describing the server (web servers, sites, SSL certificates, system info)
+- **Full backup** with options for what to include:
+  - SSL certificates (Let's Encrypt / certbot)
+  - Website files from `/var/www` — choose specific sites (sizes shown) since running sites may be large
+- List, download, and delete previously created backups
+
 ## 🚀 Quick Start
 
 ### Prerequisites
@@ -207,6 +216,11 @@ python app.py
 - `POST /api/site/config/<server>/<name>` - Update site config
 - `POST /api/site/toggle/<server>/<name>` - Enable/disable site
 - `DELETE /api/site/delete/<server>/<name>` - Delete site
+- `GET /api/backup/info` - Backup overview (web servers, site counts, certbot, /var/www sizes, saved backups)
+- `GET /api/backup/configs` - One-click download of all site configs as a `.tar.gz`
+- `POST /api/backup/create` - Create a full backup (options: SSL certs, website files, selected sites)
+- `GET /api/backup/download/<filename>` - Download a saved backup
+- `DELETE /api/backup/delete/<filename>` - Delete a saved backup
 
 ## 🤝 Contributing
 
