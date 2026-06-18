@@ -77,6 +77,35 @@ def run_cmd(cmd):
     except:
         return None
 
+
+def run_cmd_detailed(cmd, timeout=120):
+    """Run a shell command and return success, output and any error text.
+
+    Unlike run_cmd(), this preserves stderr so callers can show the user a
+    clear explanation of why something failed.
+    """
+    try:
+        result = subprocess.run(cmd, shell=True, capture_output=True, text=True, timeout=timeout)
+        return {
+            "success": result.returncode == 0,
+            "returncode": result.returncode,
+            "stdout": result.stdout.strip(),
+            "stderr": result.stderr.strip(),
+        }
+    except subprocess.TimeoutExpired:
+        return {"success": False, "returncode": -1, "stdout": "",
+                "stderr": f"Command timed out after {timeout}s"}
+    except Exception as e:
+        return {"success": False, "returncode": -1, "stdout": "", "stderr": str(e)}
+
+
+def _tail(text, lines=3, limit=400):
+    """Return the last few lines of command output, trimmed for display."""
+    if not text:
+        return ""
+    snippet = " ".join(text.strip().splitlines()[-lines:])
+    return snippet[:limit] + ("…" if len(snippet) > limit else "")
+
 def get_version(cmd):
     """Get version from command output"""
     output = run_cmd(cmd)
@@ -163,15 +192,23 @@ def get_system_info():
 def install_software(software):
     """Install specified software"""
     if software not in INSTALL_COMMANDS:
-        return jsonify({"success": False, "message": "Unknown software"}), 400
-    
-    # Update apt first
-    run_cmd("sudo apt-get update")
-    
-    result = run_cmd(INSTALL_COMMANDS[software])
-    if result is not None or shutil.which(software):
-        return jsonify({"success": True, "message": f"{software} installed successfully"})
-    return jsonify({"success": False, "message": f"Failed to install {software}"}), 500
+        return jsonify({"success": False, "message": f"Unknown software '{software}'."}), 400
+
+    # Update apt first so package metadata is fresh.
+    update = run_cmd_detailed("sudo apt-get update")
+    if not update["success"]:
+        return jsonify({"success": False,
+                        "message": f"'apt-get update' failed, cannot install {software}: {_tail(update['stderr'] or update['stdout'])}"}), 500
+
+    res = run_cmd_detailed(INSTALL_COMMANDS[software])
+    present = bool(shutil.which(software))
+    if res["success"] and present:
+        return jsonify({"success": True, "message": f"{software} installed successfully and is now available."})
+    if res["success"]:
+        return jsonify({"success": True,
+                        "message": f"{software} installation finished. If the command differs from the package name it may already be ready to use."})
+    return jsonify({"success": False,
+                    "message": f"Failed to install {software}: {_tail(res['stderr'] or res['stdout']) or 'no output captured. Check that the server has sudo and internet access.'}"}), 500
 
 @app.route("/api/services")
 def get_services():
@@ -189,10 +226,13 @@ def get_services():
 def manage_service(action, service):
     """Start/stop/restart a service"""
     if action not in ["start", "stop", "restart", "enable", "disable"]:
-        return jsonify({"success": False, "message": "Invalid action"}), 400
-    
-    result = run_cmd(f"sudo systemctl {action} {service}")
-    return jsonify({"success": True, "message": f"Service {service} {action}ed"})
+        return jsonify({"success": False, "message": f"Invalid action '{action}'."}), 400
+
+    res = run_cmd_detailed(f"sudo systemctl {action} {service}")
+    if res["success"]:
+        return jsonify({"success": True, "message": f"Service '{service}' {action}ed successfully."})
+    detail = _tail(res["stderr"] or res["stdout"]) or "no details returned"
+    return jsonify({"success": False, "message": f"Failed to {action} '{service}': {detail}"}), 500
 
 @app.route("/api/pip/install", methods=["POST"])
 def install_pip_package():
@@ -649,14 +689,18 @@ def backup_configs():
 
     run_cmd(f"sudo rm -rf {staging}")
     run_cmd(f"sudo mkdir -p {staging}")
-    _copy_configs(staging)
+    copied = _copy_configs(staging)
     _write_manifest(staging, build_manifest({"type": "configs-only"}))
-    run_cmd(f"sudo tar czf {archive} -C /tmp {name}")
+    tar = run_cmd_detailed(f"sudo tar czf {archive} -C /tmp {name}")
     run_cmd(f"sudo chmod 644 {archive}")
     run_cmd(f"sudo rm -rf {staging}")
 
     if not os.path.exists(archive):
-        return jsonify({"success": False, "message": "Failed to build configs archive"}), 500
+        detail = _tail(tar["stderr"]) or "could not write the archive (check disk space and sudo access)."
+        return jsonify({"success": False, "message": f"Failed to build configs archive: {detail}"}), 500
+    if not copied:
+        # Nothing to archive but still return the (manifest-only) file with a hint via header.
+        pass
     return send_file(archive, as_attachment=True, download_name=f"{name}.tar.gz")
 
 
@@ -696,16 +740,23 @@ def backup_create():
     }))
 
     archive = f"{BACKUP_DIR}/{name}.tar.gz"
-    run_cmd(f"sudo tar czf {archive} -C {BACKUP_DIR} {name}")
+    tar = run_cmd_detailed(f"sudo tar czf {archive} -C {BACKUP_DIR} {name}")
     run_cmd(f"sudo chmod 644 {archive}")
     run_cmd(f"sudo rm -rf {staging}")
 
     if not os.path.exists(archive):
-        return jsonify({"success": False, "message": "Failed to create backup"}), 500
+        detail = _tail(tar["stderr"]) or "could not write the archive (check disk space and sudo access)."
+        return jsonify({"success": False, "message": f"Failed to create backup: {detail}"}), 500
+
     st = os.stat(archive)
+    parts = ["web server configs"]
+    if include_certbot:
+        parts.append("SSL certificates")
+    if included_sites:
+        parts.append(f"{len(included_sites)} website(s)")
     return jsonify({
         "success": True,
-        "message": f"Backup created ({human_bytes(st.st_size)})",
+        "message": f"Backup created ({human_bytes(st.st_size)}) including: {', '.join(parts)}.",
         "name": f"{name}.tar.gz",
         "size": human_bytes(st.st_size),
     })
@@ -820,68 +871,185 @@ def import_upload():
     })
 
 
+def _step(name, status, detail):
+    """Build one structured restore-step result for the UI."""
+    return {"name": name, "status": status, "detail": detail}
+
+
+def _dir_exists(path):
+    return run_cmd(f"sudo test -d {path} && echo y") == "y"
+
+
+def _restore_webserver(name, root_sub, live_dirs, rollback_sub, test_cmd, reload_cmd):
+    """Restore a web server's site config dirs, with snapshot + rollback.
+
+    Snapshots the current live dirs, copies the archived configs in, then runs
+    the syntax test. On any failure the live dirs are reverted to the snapshot
+    and the server is reloaded with the known-good config.
+    """
+    run_cmd(f"sudo mkdir -p {rollback_sub}")
+    snapshots = {}  # live dir -> snapshot path (or None if it didn't exist)
+    for d in live_dirs:
+        snap = os.path.join(rollback_sub, os.path.basename(d))
+        if _dir_exists(d):
+            run_cmd(f"sudo cp -a {d} {snap}")
+            snapshots[d] = snap
+        else:
+            snapshots[d] = None
+
+    def _rollback():
+        for live, snap in snapshots.items():
+            run_cmd(f"sudo rm -rf {live}")
+            if snap:
+                run_cmd(f"sudo cp -a {snap} {live}")
+            else:
+                run_cmd(f"sudo mkdir -p {live}")
+        run_cmd(reload_cmd)
+
+    # Copy the archived configs into place.
+    for d in live_dirs:
+        sub = os.path.join(root_sub, os.path.basename(d))
+        if _dir_exists(sub):
+            run_cmd(f"sudo mkdir -p {d}")
+            run_cmd(f"sudo cp -a {sub}/. {d}/")
+    count = len(_ls(os.path.join(root_sub, "sites-available")))
+
+    test = run_cmd_detailed(test_cmd)
+    if not test["success"]:
+        _rollback()
+        err = _tail(test["stderr"] or test["stdout"]) or "unknown configuration error"
+        return _step(name, "error",
+                     f"Configuration test failed, so the restore was ROLLED BACK to the previous working config. "
+                     f"The server was not changed. Reason: {err}")
+
+    reload_res = run_cmd_detailed(reload_cmd)
+    if not reload_res["success"]:
+        _rollback()
+        err = _tail(reload_res["stderr"] or reload_res["stdout"]) or "unknown reload error"
+        return _step(name, "error",
+                     f"Config test passed but reloading the server failed, so the restore was ROLLED BACK. Reason: {err}")
+
+    return _step(name, "success",
+                 f"Restored {count} config file(s); configuration test passed and the server was reloaded successfully.")
+
+
 @app.route("/api/import/apply", methods=["POST"])
 def import_apply():
-    """Restore selected parts of a previously uploaded backup archive."""
+    """Restore selected parts of a previously uploaded backup archive.
+
+    Every component is snapshotted before being overwritten and automatically
+    rolled back if its step fails. Returns a per-step report for the UI.
+    """
     data = request.get_json() or {}
-    root = _import_root(data.get("token", ""))
+    token = data.get("token", "")
+    root = _import_root(token)
     if not root:
-        return jsonify({"success": False, "message": "Import session not found (re-upload the archive)"}), 400
+        return jsonify({"success": False,
+                        "message": "Import session not found — please re-upload the archive and try again.",
+                        "steps": []}), 400
 
     selected_sites = data.get("sites", []) or []
-    results, warnings = [], []
+    rollback_dir = os.path.join(IMPORTS_DIR, token + "_rollback")
+    run_cmd(f"sudo rm -rf {rollback_dir}")
+    run_cmd(f"sudo mkdir -p {rollback_dir}")
+    steps = []
 
-    if data.get("restore_nginx") and run_cmd(f"sudo test -d {root}/nginx/sites-available && echo y") == "y":
-        run_cmd("sudo mkdir -p /etc/nginx/sites-available /etc/nginx/sites-enabled")
-        run_cmd(f"sudo cp -a {root}/nginx/sites-available/. /etc/nginx/sites-available/")
-        if run_cmd(f"sudo test -d {root}/nginx/sites-enabled && echo y") == "y":
-            run_cmd(f"sudo cp -a {root}/nginx/sites-enabled/. /etc/nginx/sites-enabled/")
-        test = run_cmd("sudo nginx -t 2>&1")
-        if test and "successful" in test:
-            run_cmd("sudo systemctl reload nginx")
-            results.append("Nginx site configs restored")
+    # ---- Nginx ----
+    if data.get("restore_nginx"):
+        if _dir_exists(f"{root}/nginx/sites-available"):
+            steps.append(_restore_webserver(
+                "Nginx site configs", f"{root}/nginx",
+                ["/etc/nginx/sites-available", "/etc/nginx/sites-enabled"],
+                f"{rollback_dir}/nginx", "sudo nginx -t", "sudo systemctl reload nginx"))
         else:
-            warnings.append(f"Nginx config test failed, not reloaded: {test}")
+            steps.append(_step("Nginx site configs", "skipped", "No Nginx configs were found in this archive."))
 
-    if data.get("restore_apache") and run_cmd(f"sudo test -d {root}/apache2/sites-available && echo y") == "y":
-        run_cmd("sudo mkdir -p /etc/apache2/sites-available /etc/apache2/sites-enabled")
-        run_cmd(f"sudo cp -a {root}/apache2/sites-available/. /etc/apache2/sites-available/")
-        if run_cmd(f"sudo test -d {root}/apache2/sites-enabled && echo y") == "y":
-            run_cmd(f"sudo cp -a {root}/apache2/sites-enabled/. /etc/apache2/sites-enabled/")
-        test = run_cmd("sudo apachectl configtest 2>&1")
-        if test and "Syntax OK" in test:
-            run_cmd("sudo systemctl reload apache2")
-            results.append("Apache site configs restored")
+    # ---- Apache ----
+    if data.get("restore_apache"):
+        if _dir_exists(f"{root}/apache2/sites-available"):
+            steps.append(_restore_webserver(
+                "Apache site configs", f"{root}/apache2",
+                ["/etc/apache2/sites-available", "/etc/apache2/sites-enabled"],
+                f"{rollback_dir}/apache2", "sudo apachectl configtest", "sudo systemctl reload apache2"))
         else:
-            warnings.append(f"Apache config test failed, not reloaded: {test}")
+            steps.append(_step("Apache site configs", "skipped", "No Apache configs were found in this archive."))
 
-    if data.get("restore_certbot") and run_cmd(f"sudo test -d {root}/letsencrypt && echo y") == "y":
-        run_cmd("sudo mkdir -p /etc/letsencrypt")
-        run_cmd(f"sudo cp -a {root}/letsencrypt/. /etc/letsencrypt/")
-        results.append("SSL certificates (Let's Encrypt) restored")
+    # ---- SSL / certbot ----
+    if data.get("restore_certbot"):
+        if _dir_exists(f"{root}/letsencrypt"):
+            existed = _dir_exists("/etc/letsencrypt")
+            snap = f"{rollback_dir}/letsencrypt"
+            if existed:
+                run_cmd(f"sudo cp -a /etc/letsencrypt {snap}")
+            run_cmd("sudo mkdir -p /etc/letsencrypt")
+            res = run_cmd_detailed(f"sudo cp -a {root}/letsencrypt/. /etc/letsencrypt/")
+            if res["success"]:
+                domains = [d for d in _ls(f"{root}/letsencrypt/live") if d != "README"]
+                steps.append(_step("SSL certificates", "success",
+                                   f"Restored {len(domains)} certificate(s): {', '.join(domains) or 'none'}. "
+                                   f"Certificates are domain-bound and will work on this server's IP; "
+                                   f"run 'certbot renew --dry-run' to confirm renewal."))
+            else:
+                run_cmd("sudo rm -rf /etc/letsencrypt")
+                if existed:
+                    run_cmd(f"sudo cp -a {snap} /etc/letsencrypt")
+                steps.append(_step("SSL certificates", "error",
+                                   f"Copy failed and was ROLLED BACK. Reason: {_tail(res['stderr']) or 'unknown error'}"))
+        else:
+            steps.append(_step("SSL certificates", "skipped", "No SSL certificates were found in this archive."))
 
-    if data.get("restore_site_files") and run_cmd(f"sudo test -d {root}/www && echo y") == "y":
-        restored = []
-        for site in _ls(f"{root}/www"):
-            if selected_sites and site not in selected_sites:
-                continue
-            dest = f"/var/www/{site}"
-            run_cmd(f"sudo mkdir -p {dest}")
-            run_cmd(f"sudo cp -a {root}/www/{site}/. {dest}/")
-            run_cmd(f"sudo chown -R www-data:www-data {dest}")
-            restored.append(site)
-        if restored:
-            results.append(f"Website files restored: {', '.join(restored)}")
+    # ---- Website files ----
+    if data.get("restore_site_files"):
+        if _dir_exists(f"{root}/www"):
+            restored, failed = [], []
+            for site in _ls(f"{root}/www"):
+                if selected_sites and site not in selected_sites:
+                    continue
+                dest = f"/var/www/{site}"
+                backup = f"{rollback_dir}/www_{site}"
+                existed = _dir_exists(dest)
+                if existed:
+                    run_cmd(f"sudo mv {dest} {backup}")  # fast rename for rollback
+                run_cmd(f"sudo mkdir -p {dest}")
+                res = run_cmd_detailed(f"sudo cp -a {root}/www/{site}/. {dest}/")
+                if res["success"]:
+                    run_cmd(f"sudo chown -R www-data:www-data {dest}")
+                    if existed:
+                        run_cmd(f"sudo rm -rf {backup}")
+                    restored.append(site)
+                else:
+                    run_cmd(f"sudo rm -rf {dest}")
+                    if existed:
+                        run_cmd(f"sudo mv {backup} {dest}")  # rollback
+                    failed.append(f"{site} ({_tail(res['stderr']) or 'copy error'})")
+            if restored:
+                steps.append(_step("Website files", "success",
+                                   f"Restored {len(restored)} site(s) into /var/www and set ownership to www-data: {', '.join(restored)}."))
+            if failed:
+                steps.append(_step("Website files", "error",
+                                   f"Failed and ROLLED BACK for: {'; '.join(failed)}."))
+            if not restored and not failed:
+                steps.append(_step("Website files", "skipped", "No matching website directories were found in this archive."))
+        else:
+            steps.append(_step("Website files", "skipped", "No website files were found in this archive."))
 
-    run_cmd(f"sudo rm -rf {os.path.join(IMPORTS_DIR, data.get('token', ''))}")
+    # Clean up staging + rollback (system is already in a consistent state).
+    run_cmd(f"sudo rm -rf {os.path.join(IMPORTS_DIR, token)}")
+    run_cmd(f"sudo rm -rf {rollback_dir}")
 
-    if not results and not warnings:
-        return jsonify({"success": False, "message": "Nothing was selected to restore"}), 400
+    actioned = [s for s in steps if s["status"] != "skipped"]
+    if not actioned:
+        return jsonify({"success": False,
+                        "message": "Nothing was restored — either no items were selected or the archive had no matching content.",
+                        "steps": steps}), 400
 
-    message = "; ".join(results)
-    if warnings:
-        message = (message + " | " if message else "") + "Warnings: " + "; ".join(warnings)
-    return jsonify({"success": len(warnings) == 0, "message": message or "Restore completed"})
+    errors = [s for s in steps if s["status"] == "error"]
+    if errors:
+        message = (f"Restore finished with {len(errors)} failure(s) (each was rolled back automatically). "
+                   f"See the details below.")
+    else:
+        message = f"Restore completed successfully — {len(actioned)} item(s) restored."
+    return jsonify({"success": not errors, "message": message, "steps": steps})
 
 
 @app.route("/api/import/cancel", methods=["POST"])

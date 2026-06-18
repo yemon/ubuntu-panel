@@ -33,6 +33,9 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 ## [Unreleased]
 
 ### Added
+- Automatic rollback on restore failure: each component is snapshotted before being overwritten and reverted to the previous working state if its step fails (web server config that fails its syntax test is never left applied)
+- Verbose, per-step restore report in the UI (success / error / skipped) with clear explanations
+- Clearer success and failure messages across install, service, backup, and import actions, surfacing the real underlying error instead of a generic failure
 - Import / Restore: upload a backup `.tar.gz` and restore site configs, SSL certificates, and selected website files (for migrating to a new server)
 - Import inspects the archive (source host, configs, certbot domains, website sizes) before restoring, with per-item selection
 - Web server config is syntax-tested before reload during restore

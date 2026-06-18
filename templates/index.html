@@ -41,7 +41,7 @@
         .pip-list { max-height: 200px; overflow-y: auto; }
         .pip-item { padding: 6px 10px; background: #0f172a; border-radius: 4px; margin-bottom: 4px; font-family: monospace; font-size: 0.85rem; }
         .loading { text-align: center; padding: 20px; color: #64748b; }
-        .toast { position: fixed; bottom: 20px; right: 20px; padding: 15px 25px; border-radius: 8px; color: white; font-weight: 600; z-index: 1000; animation: slideIn 0.3s ease; }
+        .toast { position: fixed; bottom: 20px; right: 20px; padding: 15px 25px; border-radius: 8px; color: white; font-weight: 600; z-index: 1000; animation: slideIn 0.3s ease; max-width: 440px; word-wrap: break-word; white-space: pre-wrap; cursor: pointer; }
         .toast.success { background: #166534; }
         .toast.error { background: #991b1b; }
         @keyframes slideIn { from { transform: translateX(100%); opacity: 0; } to { transform: translateX(0); opacity: 1; } }
@@ -274,12 +274,14 @@
     </div>
     
     <script>
-        function showToast(message, type = 'success') {
+        function showToast(message, type = 'success', duration) {
             const toast = document.createElement('div');
             toast.className = `toast ${type}`;
             toast.textContent = message;
+            toast.onclick = () => toast.remove();  // click to dismiss long messages
             document.body.appendChild(toast);
-            setTimeout(() => toast.remove(), 3000);
+            const ms = duration || (type === 'error' ? 8000 : 4000);
+            setTimeout(() => toast.remove(), ms);
         }
 
         function switchTab(tab) {
@@ -699,7 +701,7 @@
 
         async function applyImport(btn) {
             if (!importToken) return;
-            if (!confirm('Restore selected items? Existing files with the same names will be overwritten.')) return;
+            if (!confirm('Restore selected items? Existing files are snapshotted first and automatically rolled back if a step fails.')) return;
             btn.disabled = true; btn.textContent = 'Restoring...';
             const payload = {
                 token: importToken,
@@ -716,15 +718,33 @@
                     body: JSON.stringify(payload)
                 });
                 const data = await res.json();
+                renderImportResult(data);
                 showToast(data.message, data.success ? 'success' : 'error');
-                if (data.success) {
-                    importToken = null;
-                    document.getElementById('import-details').innerHTML = '';
-                    document.getElementById('import-file').value = '';
-                    loadBackupInfo();
-                }
-            } catch (e) { showToast('Restore failed', 'error'); }
+                importToken = null;
+                document.getElementById('import-file').value = '';
+                if (data.success) loadBackupInfo();
+            } catch (e) { showToast('Restore failed: could not reach the server.', 'error'); }
             btn.disabled = false; btn.textContent = 'Restore Selected';
+        }
+
+        function renderImportResult(data) {
+            const color = { success: '#86efac', error: '#fca5a5', warning: '#fed7aa', skipped: '#64748b' };
+            const icon = { success: '✓', error: '✕', warning: '!', skipped: '–' };
+            const head = data.success ? '#86efac' : '#fca5a5';
+            let html = '<div style="background:#0f172a; border-radius:8px; padding:15px;">';
+            html += `<h3 style="color:${head}; font-size:0.95rem; margin-bottom:12px;">${data.success ? '✓ ' : '✕ '}${data.message}</h3>`;
+            for (const s of (data.steps || [])) {
+                const c = color[s.status] || '#e2e8f0';
+                html += `
+                    <div style="padding:10px 12px; border-left:3px solid ${c}; background:#1e293b; border-radius:4px; margin-bottom:8px;">
+                        <div style="color:${c}; font-weight:600;">${icon[s.status] || ''} ${s.name}
+                            <span style="font-size:0.7rem; text-transform:uppercase; opacity:0.8;">(${s.status})</span></div>
+                        <div class="site-details" style="margin-top:5px; white-space:pre-wrap; color:#cbd5e1;">${s.detail || ''}</div>
+                    </div>`;
+            }
+            html += '<button class="btn btn-action" style="margin-top:6px;" onclick="cancelImport()">Close</button>';
+            html += '</div>';
+            document.getElementById('import-details').innerHTML = html;
         }
 
         async function cancelImport() {
