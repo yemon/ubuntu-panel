@@ -33,6 +33,9 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 ## [Unreleased]
 
 ### Added
+- Session-based login page protecting all pages and API endpoints
+- Credentials and session secret loaded from a `.env` file (`ADMIN_USERNAME`, `ADMIN_PASSWORD`, `SECRET_KEY`)
+- `.env.example` template and `/login` + `/logout` routes; logout button in the dashboard
 - Backup & Export tab with full server backup support
 - One-click download of all Nginx/Apache site configs as a single `.tar.gz`
 - Every backup includes a `manifest.json` describing the server (web servers, sites, SSL, system info)

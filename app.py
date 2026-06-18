@@ -1,12 +1,68 @@
-from flask import Flask, render_template, jsonify, request, send_file, abort
+from flask import Flask, render_template, jsonify, request, send_file, abort, session, redirect, url_for
 import subprocess
 import shutil
 import os
 import re
 import json
 import datetime
+import hmac
+
+try:
+    from dotenv import load_dotenv
+    load_dotenv()
+except ImportError:
+    # python-dotenv is optional; fall back to real environment variables.
+    pass
 
 app = Flask(__name__)
+
+# Session signing key. Set SECRET_KEY in .env; a random key is used as a
+# fallback (which invalidates existing sessions whenever the app restarts).
+app.secret_key = os.environ.get("SECRET_KEY") or os.urandom(32)
+
+# Login credentials, read from the environment / .env file.
+ADMIN_USERNAME = os.environ.get("ADMIN_USERNAME", "admin")
+ADMIN_PASSWORD = os.environ.get("ADMIN_PASSWORD", "")
+
+
+@app.before_request
+def require_login():
+    """Gate every request behind a logged-in session."""
+    if request.endpoint in ("login", "static"):
+        return
+    if session.get("logged_in"):
+        return
+    if request.path.startswith("/api/"):
+        return jsonify({"success": False, "message": "Authentication required"}), 401
+    return redirect(url_for("login"))
+
+
+@app.route("/login", methods=["GET", "POST"])
+def login():
+    """Render the login page and authenticate credentials."""
+    if request.method == "POST":
+        username = request.form.get("username", "")
+        password = request.form.get("password", "")
+        valid = (
+            bool(ADMIN_PASSWORD)
+            and hmac.compare_digest(username, ADMIN_USERNAME)
+            and hmac.compare_digest(password, ADMIN_PASSWORD)
+        )
+        if valid:
+            session["logged_in"] = True
+            session["username"] = username
+            return redirect(url_for("index"))
+        return render_template("login.html", error="Invalid username or password"), 401
+    if session.get("logged_in"):
+        return redirect(url_for("index"))
+    return render_template("login.html")
+
+
+@app.route("/logout")
+def logout():
+    """Clear the session and return to the login page."""
+    session.clear()
+    return redirect(url_for("login"))
 
 NGINX_SITES_AVAILABLE = "/etc/nginx/sites-available"
 NGINX_SITES_ENABLED = "/etc/nginx/sites-enabled"

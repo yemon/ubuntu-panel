@@ -47,6 +47,8 @@
         @keyframes slideIn { from { transform: translateX(100%); opacity: 0; } to { transform: translateX(0); opacity: 1; } }
         .refresh-btn { position: fixed; top: 20px; right: 20px; background: #334155; color: #f1f5f9; padding: 10px 20px; border-radius: 8px; border: none; cursor: pointer; }
         .refresh-btn:hover { background: #475569; }
+        .logout-btn { position: fixed; top: 20px; right: 130px; background: #7f1d1d; color: #fecaca; padding: 10px 20px; border-radius: 8px; border: none; cursor: pointer; text-decoration: none; display: inline-block; }
+        .logout-btn:hover { background: #991b1b; }
         .tabs { display: flex; gap: 10px; margin-bottom: 20px; border-bottom: 2px solid #334155; padding-bottom: 10px; }
         .tab { padding: 10px 20px; background: transparent; border: none; color: #64748b; cursor: pointer; font-size: 1rem; border-radius: 6px 6px 0 0; }
         .tab.active { background: #334155; color: #38bdf8; }
@@ -77,6 +79,7 @@
 </head>
 <body>
     <button class="refresh-btn" onclick="loadAll()">↻ Refresh</button>
+    <a class="logout-btn" href="/logout">⏻ Logout</a>
     <div class="container">
         <h1>🖥️ VPS Manager</h1>
         

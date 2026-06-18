@@ -87,11 +87,36 @@ source venv/bin/activate
 # Install requirements
 pip install -r requirements.txt
 
+# Configure login credentials
+cp .env.example .env
+nano .env   # set ADMIN_USERNAME, ADMIN_PASSWORD and SECRET_KEY
+
 # Run the application
 python app.py
 ```
 
-Access the dashboard at `http://YOUR_VPS_IP:5000`
+Access the dashboard at `http://YOUR_VPS_IP:5000` and sign in with the
+credentials you set in `.env`.
+
+### Authentication
+
+The dashboard is protected by a session-based login. Credentials are read
+from a `.env` file (which is git-ignored — never commit it):
+
+```ini
+ADMIN_USERNAME=admin
+ADMIN_PASSWORD=change-this-password
+SECRET_KEY=change-this-to-a-long-random-string
+```
+
+Generate a strong secret key with:
+
+```bash
+python3 -c "import secrets; print(secrets.token_hex(32))"
+```
+
+All pages and API endpoints require authentication; unauthenticated API
+requests receive `401 Unauthorized`.
 
 ## 📖 Usage
 
@@ -179,7 +204,7 @@ server {
 **⚠️ IMPORTANT**: This tool executes commands with sudo privileges.
 
 ### Recommendations:
-1. **Use authentication**: Add Flask-Login or HTTP basic auth
+1. **Authentication**: A session-based login is built in — set strong `ADMIN_PASSWORD` and `SECRET_KEY` values in `.env`
 2. **Firewall**: Restrict port 5000 to trusted IPs
 3. **HTTPS**: Always use SSL in production
 4. **VPN**: Run behind a VPN or private network

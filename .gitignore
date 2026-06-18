@@ -27,6 +27,9 @@ wheels/
 instance/
 .webassets-cache
 
+# Environment / secrets
+.env
+
 # IDE
 .vscode/
 .idea/
