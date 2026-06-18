@@ -7,6 +7,7 @@ import json
 import datetime
 import hmac
 import shlex
+import socket
 
 try:
     from dotenv import load_dotenv
@@ -1536,6 +1537,55 @@ def migrate_start():
                     "message": f"Migration started ({verb} {remote})."})
 
 
+def find_free_port(start, attempts=20):
+    """Return the first free TCP port at or after `start` (or None)."""
+    for p in range(start, start + attempts):
+        with socket.socket(socket.AF_INET, socket.SOCK_STREAM) as s:
+            s.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
+            try:
+                s.bind(("0.0.0.0", p))
+                return p
+            except OSError:
+                continue
+    return None
+
+
+def _ufw_hint(port):
+    """Return a firewall message for `port` based on `ufw status`, or None."""
+    status = run_cmd("sudo ufw status")  # needs (passwordless) sudo; None if unavailable
+    if not status or "Status: active" not in status:
+        return None  # ufw inactive/not installed/unreadable — nothing to advise
+    for line in status.splitlines():
+        if re.search(rf"(^|\s){port}(/tcp)?(\s|$)", line) and "ALLOW" in line:
+            return f"Firewall: ufw is active and port {port}/tcp is already allowed. ✅"
+    return (f"Firewall: ufw is active and port {port} is NOT open. Allow it with:\n"
+            f"   sudo ufw allow {port}/tcp")
+
+
+def _print_banner(port, requested):
+    ip = run_cmd("hostname -I | awk '{print $1}'") or "YOUR_SERVER_IP"
+    bar = "=" * 56
+    print("\n" + bar)
+    print("  🖥️  VPS Manager — dev server")
+    if port != requested:
+        print(f"  ⚠ Port {requested} was busy; using the next free port {port}.")
+    print(f"  ➜ Open in your browser:  http://{ip}:{port}")
+    print(f"  ➜ Local:                 http://127.0.0.1:{port}")
+    hint = _ufw_hint(port)
+    if hint:
+        print("  " + hint.replace("\n", "\n  "))
+    print(bar + "\n")
+
+
 if __name__ == "__main__":
-    port = int(os.environ.get("PORT", 5000))
+    requested = int(os.environ.get("PORT", 5000))
+    if os.environ.get("WERKZEUG_RUN_MAIN") == "true":
+        # Reloader child: reuse the port the parent already chose.
+        port = int(os.environ.get("PORT", requested))
+    else:
+        port = find_free_port(requested)
+        if port is None:
+            raise SystemExit(f"No free port found in range {requested}-{requested + 19}.")
+        os.environ["PORT"] = str(port)  # so the reloader child reuses it
+        _print_banner(port, requested)
     app.run(host="0.0.0.0", port=port, debug=True)
