@@ -78,6 +78,13 @@ A modern, web-based control panel for managing Ubuntu VPS servers. Built with Fl
 - Runs in the background with a live progress log (so large transfers don't time out the request) and can be cancelled
 - Requires `rsync` on both servers (and `sshpass` on this server for password auth)
 
+### 🧭 Migration Wizard
+- Guided, role-based migration when **both servers run this panel** (install it on the old and new server)
+- Pick this server's role — **Source** (push to another server) or **Destination** (pull from another server) — and it tells you what to do
+- Enter the other server's address once; the wizard loads what's available (websites with sizes, databases, SSL, configs) — from this server when pushing, or from the remote source when pulling
+- Choose all or specific websites and databases, plus SSL certificates and web server configs
+- Transfers directly over SSH using rsync (files) and `mysqldump` (databases streamed into the remote/local MySQL), in the background with a live log, dry-run preview, and cancel
+
 ## 🚀 Quick Start
 
 ### Prerequisites
@@ -269,6 +276,8 @@ python app.py
 - `POST /api/sync/start` - Start a background rsync transfer to another server
 - `GET /api/sync/status/<job_id>` - Poll progress/output of a transfer
 - `POST /api/sync/cancel/<job_id>` - Cancel a running transfer
+- `POST /api/migrate/inspect` - Connect to the other server and list its websites/databases/SSL/configs
+- `POST /api/migrate/start` - Start a role-based migration (source pushes, destination pulls)
 
 ## 🤝 Contributing
 

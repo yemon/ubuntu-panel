@@ -1366,5 +1366,175 @@ def sync_cancel(job_id):
     return jsonify({"success": True, "message": "Transfer cancelled."})
 
 
+# ============ MIGRATION WIZARD (role-based, SSH between servers) ============
+# Source pushes selected data to the destination; Destination pulls from the
+# source. Both reuse the rsync/ssh helpers and the background-job machinery
+# above (jobs land in sync_jobs and are polled via /api/sync/status).
+
+
+FAIL = " || MIGRATION_FAILED=1"  # suffix for steps whose failure should mark the job failed
+
+
+def _launch_transfer(lines, remote, pwfile):
+    """Run steps sequentially as one background job; exit non-zero if any failed.
+
+    Steps run line by line (not chained with &&) so one failure does not skip
+    the rest; required steps carry the FAIL suffix to flag the overall result,
+    while best-effort steps use '|| true'. pipefail makes piped steps report
+    the real failure.
+    """
+    job_id = "sync_" + datetime.datetime.now().strftime("%Y%m%d_%H%M%S") + "_" + os.urandom(3).hex()
+    os.makedirs(SYNC_DIR, exist_ok=True)
+    log = f"{SYNC_DIR}/{job_id}.log"
+    script = "set -o pipefail\nMIGRATION_FAILED=0\n" + "\n".join(lines) + "\nexit $MIGRATION_FAILED"
+    full = f"sudo bash -c {shlex.quote(script)} > {shlex.quote(log)} 2>&1; echo EXIT_CODE:$? >> {shlex.quote(log)}"
+    proc = subprocess.Popen(full, shell=True)
+    sync_jobs[job_id] = {"proc": proc, "log": log, "remote": remote, "pwfile": pwfile,
+                         "started": datetime.datetime.now().isoformat()}
+    return job_id
+
+
+@app.route("/api/migrate/inspect", methods=["POST"])
+def migrate_inspect():
+    """Connect to the other server over SSH and report connectivity + inventory."""
+    data = request.get_json() or {}
+    user, host = data.get("user", ""), data.get("host", "")
+    if not _safe(user, _USER_RE):
+        return jsonify({"success": False, "message": "Invalid remote username."}), 400
+    if not _safe(host, _HOST_RE):
+        return jsonify({"success": False, "message": "Invalid remote host."}), 400
+    ok, ssh, pwfile, err = _build_ssh(data)
+    if not ok:
+        return jsonify({"success": False, "message": err}), 400
+    remote = f"{user}@{host}"
+    sudo = "sudo " if data.get("remote_sudo", True) else ""
+
+    def rssh(cmd, timeout=40):
+        return run_cmd_detailed(f"sudo {ssh} {remote} {shlex.quote(cmd)}", timeout=timeout)
+
+    test = rssh("echo connection_ok", timeout=30)
+    if not (test["success"] and "connection_ok" in test["stdout"]):
+        if pwfile:
+            run_cmd(f"sudo rm -f {shlex.quote(pwfile)}")
+        return jsonify({"success": False,
+                        "message": f"Cannot reach {remote}: {_tail(test['stderr'] or test['stdout']) or 'no response (check host, port, credentials).'}"}), 400
+
+    www = []
+    r = rssh(f"{sudo}du -sb /var/www/* 2>/dev/null")
+    if r["success"]:
+        for line in r["stdout"].splitlines():
+            p = line.split("\t")
+            if len(p) == 2 and p[0].isdigit():
+                www.append({"name": os.path.basename(p[1]), "size": human_bytes(int(p[0]))})
+
+    certs = []
+    r = rssh(f"{sudo}ls /etc/letsencrypt/live 2>/dev/null")
+    if r["success"]:
+        certs = [d for d in r["stdout"].split() if d != "README"]
+
+    dbs = []
+    r = rssh(f"{sudo}mysql -N -e 'SHOW DATABASES' 2>/dev/null")
+    if r["success"]:
+        dbs = [d for d in r["stdout"].splitlines() if d and d not in MYSQL_SYSTEM_DBS]
+
+    rsync_ok = rssh("command -v rsync >/dev/null && echo yes")["stdout"].strip() == "yes"
+    nginx = rssh("test -d /etc/nginx && echo y")["stdout"].strip() == "y"
+    apache = rssh("test -d /etc/apache2 && echo y")["stdout"].strip() == "y"
+
+    if pwfile:
+        run_cmd(f"sudo rm -f {shlex.quote(pwfile)}")
+    return jsonify({"success": True, "remote": remote, "www_dirs": www,
+                    "certbot_domains": certs, "databases": dbs,
+                    "rsync": rsync_ok, "nginx": nginx, "apache": apache})
+
+
+@app.route("/api/migrate/start", methods=["POST"])
+def migrate_start():
+    """Start a role-based migration: source pushes, destination pulls."""
+    data = request.get_json() or {}
+    role = data.get("role")
+    if role not in ("source", "destination"):
+        return jsonify({"success": False, "message": "Choose whether this server is the source or destination."}), 400
+
+    user, host = data.get("user", ""), data.get("host", "")
+    if not _safe(user, _USER_RE):
+        return jsonify({"success": False, "message": "Invalid remote username."}), 400
+    if not _safe(host, _HOST_RE):
+        return jsonify({"success": False, "message": "Invalid remote host."}), 400
+
+    sites = data.get("sites", []) or []
+    for s in sites:
+        if not _safe(s, _NAME_RE):
+            return jsonify({"success": False, "message": f"Invalid site name '{s}'."}), 400
+    dbs = data.get("databases", []) or []
+    for db in dbs:
+        if not _safe(db, _DB_RE):
+            return jsonify({"success": False, "message": f"Invalid database name '{db}'."}), 400
+    include_configs = bool(data.get("include_configs"))
+    include_certbot = bool(data.get("include_certbot"))
+    if not sites and not dbs and not include_configs and not include_certbot:
+        return jsonify({"success": False, "message": "Select at least one thing to migrate."}), 400
+
+    ok, ssh, pwfile, err = _build_ssh(data)
+    if not ok:
+        return jsonify({"success": False, "message": err}), 400
+
+    remote_sudo = data.get("remote_sudo", True)
+    remote = f"{user}@{host}"
+    flags = "-az --info=progress2 --human-readable"
+    if data.get("dry_run"):
+        flags += " --dry-run"
+    if data.get("delete"):
+        flags += " --delete"
+    rpath = ' --rsync-path="sudo rsync"' if remote_sudo else ""
+    rsudo = "sudo " if remote_sudo else ""
+    mdump, mclient = _mysql_auth("mysqldump"), _mysql_auth("mysql")
+
+    arrow = "->" if role == "source" else "<-"
+    lines = [f'echo "Migration ({role}) {arrow} {remote}"']
+    if data.get("dry_run"):
+        lines.append('echo "(DRY RUN — nothing will actually be written)"')
+
+    if role == "source":  # push local -> remote
+        if sites:
+            srcs = " ".join(f"/var/www/{s}" for s in sites)
+            lines.append('echo "=== Websites -> remote ==="')
+            lines.append(f'rsync {flags}{rpath} -e "{ssh}" {srcs} {remote}:/var/www/{FAIL}')
+        if include_configs:
+            if os.path.exists(NGINX_SITES_AVAILABLE):
+                lines.append('echo "=== Nginx configs -> remote ==="')
+                lines.append(f'rsync {flags}{rpath} -e "{ssh}" /etc/nginx/sites-available /etc/nginx/sites-enabled {remote}:/etc/nginx/{FAIL}')
+            if os.path.exists(APACHE_SITES_AVAILABLE):
+                lines.append('echo "=== Apache configs -> remote ==="')
+                lines.append(f'rsync {flags}{rpath} -e "{ssh}" /etc/apache2/sites-available /etc/apache2/sites-enabled {remote}:/etc/apache2/{FAIL}')
+        if include_certbot and os.path.exists(LETSENCRYPT_DIR):
+            lines.append('echo "=== SSL certificates -> remote ==="')
+            lines.append(f'rsync {flags}{rpath} -e "{ssh}" /etc/letsencrypt {remote}:/etc/{FAIL}')
+        for db in dbs:
+            lines.append(f'echo "=== Database {db} -> remote ==="')
+            lines.append(f'{mdump} --databases {shlex.quote(db)} | {ssh} {remote} {shlex.quote(rsudo + "mysql")}{FAIL}')
+    else:  # destination: pull remote -> local
+        for s in sites:
+            lines.append(f'echo "=== Website {s} <- remote ==="')
+            lines.append(f'rsync {flags}{rpath} -e "{ssh}" {remote}:/var/www/{s} /var/www/{FAIL}')
+        if include_configs:
+            lines.append('echo "=== Web server configs <- remote (best effort) ==="')
+            for sub in ("sites-available", "sites-enabled"):
+                lines.append(f'rsync {flags}{rpath} -e "{ssh}" {remote}:/etc/nginx/{sub} /etc/nginx/ 2>/dev/null || true')
+                lines.append(f'rsync {flags}{rpath} -e "{ssh}" {remote}:/etc/apache2/{sub} /etc/apache2/ 2>/dev/null || true')
+        if include_certbot:
+            lines.append('echo "=== SSL certificates <- remote ==="')
+            lines.append(f'rsync {flags}{rpath} -e "{ssh}" {remote}:/etc/letsencrypt /etc/{FAIL}')
+        for db in dbs:
+            lines.append(f'echo "=== Database {db} <- remote ==="')
+            lines.append(f'{ssh} {remote} {shlex.quote(rsudo + "mysqldump --databases " + db)} | {mclient}{FAIL}')
+
+    lines.append('echo "Migration finished."')
+    job_id = _launch_transfer(lines, remote, pwfile)
+    verb = "push to" if role == "source" else "pull from"
+    return jsonify({"success": True, "job_id": job_id,
+                    "message": f"Migration started ({verb} {remote})."})
+
+
 if __name__ == "__main__":
     app.run(host="0.0.0.0", port=5000, debug=True)

@@ -33,6 +33,9 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 ## [Unreleased]
 
 ### Added
+- Migration wizard for moving a site between two servers that both run the panel: choose this server's role (Source pushes / Destination pulls), point it at the other server over SSH, select websites/databases/SSL/configs, and it transfers directly with rsync + mysqldump
+- Remote inventory inspection over SSH so the Destination can list and select what's on the Source
+- Migration runs as a background job with a live log, dry-run, and cancel (reuses the transfer job infrastructure)
 - MySQL database backup and restore: dump selected databases (with sizes) into a backup and import them again, including in the import/restore flow
 - MySQL restore snapshots each existing database first and rolls it back if the import fails
 - Optional `MYSQL_USER`/`MYSQL_PASSWORD` in `.env`; falls back to root socket auth via sudo
