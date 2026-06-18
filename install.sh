@@ -27,7 +27,8 @@ fi
 echo "📦 Installing system dependencies..."
 sudo apt update
 # rsync: server-to-server transfers; sshpass: optional, for password-based SSH auth
-sudo apt install -y python3 python3-pip python3-venv git rsync sshpass
+# mysql-client: provides mysql/mysqldump for database backup & restore
+sudo apt install -y python3 python3-pip python3-venv git rsync sshpass mysql-client
 
 echo ""
 echo "📁 Setting up application directory..."
