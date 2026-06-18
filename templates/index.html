@@ -192,6 +192,63 @@
                 </div>
 
                 <div class="card" style="grid-column: span 2;">
+                    <h2>Server-to-Server Transfer (rsync)</h2>
+                    <p style="color:#94a3b8; font-size:0.85rem; margin-bottom:15px;">
+                        Copy large websites directly to another server over SSH — only changed data is sent and
+                        interrupted transfers can resume, so this is far better than downloading/uploading huge archives.
+                        Requires <code style="color:#38bdf8;">rsync</code> on both servers (and
+                        <code style="color:#38bdf8;">sshpass</code> if you use password auth).
+                    </p>
+                    <div class="form-row">
+                        <div class="form-group">
+                            <label>Remote User *</label>
+                            <input type="text" id="sync-user" placeholder="root" value="root">
+                        </div>
+                        <div class="form-group">
+                            <label>Remote Host / IP *</label>
+                            <input type="text" id="sync-host" placeholder="203.0.113.10">
+                        </div>
+                    </div>
+                    <div class="form-row">
+                        <div class="form-group">
+                            <label>SSH Port</label>
+                            <input type="text" id="sync-port" placeholder="22" value="22">
+                        </div>
+                        <div class="form-group">
+                            <label>Authentication</label>
+                            <select id="sync-auth" onchange="toggleSyncAuth(this.value)">
+                                <option value="key">SSH key</option>
+                                <option value="password">Password</option>
+                            </select>
+                        </div>
+                    </div>
+                    <div class="form-group" id="sync-key-group">
+                        <label>SSH Key Path (optional — blank uses the server's default key)</label>
+                        <input type="text" id="sync-key" placeholder="/root/.ssh/id_rsa">
+                    </div>
+                    <div class="form-group" id="sync-pw-group" style="display:none;">
+                        <label>SSH Password</label>
+                        <input type="password" id="sync-pw" placeholder="remote password" autocomplete="off">
+                    </div>
+                    <div class="form-group">
+                        <label>Destination directory for websites (on remote)</label>
+                        <input type="text" id="sync-dest" placeholder="/var/www" value="/var/www">
+                    </div>
+                    <label style="display:block; margin-bottom:6px; color:#94a3b8; font-size:0.9rem;">Website directories to transfer (none = none):</label>
+                    <div id="sync-sites" style="margin-bottom:12px; padding:12px; background:#0f172a; border-radius:8px;"><div class="loading">Loading...</div></div>
+                    <div class="checkbox-group" style="margin-bottom:8px;"><input type="checkbox" id="sync-configs"><label for="sync-configs">Also transfer web server configs</label></div>
+                    <div class="checkbox-group" style="margin-bottom:8px;"><input type="checkbox" id="sync-certbot"><label for="sync-certbot">Also transfer SSL certificates (Let's Encrypt)</label></div>
+                    <div class="checkbox-group" style="margin-bottom:8px;"><input type="checkbox" id="sync-remote-sudo" checked><label for="sync-remote-sudo">Remote needs sudo to write (uses <code>--rsync-path="sudo rsync"</code>)</label></div>
+                    <div class="checkbox-group" style="margin-bottom:8px;"><input type="checkbox" id="sync-dryrun" checked><label for="sync-dryrun">Dry run first (preview, transfers nothing)</label></div>
+                    <div class="checkbox-group" style="margin-bottom:14px;"><input type="checkbox" id="sync-delete"><label for="sync-delete">Delete extra files on remote (mirror exactly)</label></div>
+                    <div style="display:flex; gap:10px;">
+                        <button class="btn btn-action" style="padding:11px 18px;" onclick="testSync(this)">Test Connection</button>
+                        <button class="btn btn-install" style="flex:1; padding:11px;" onclick="startSync(this)">Start Transfer</button>
+                    </div>
+                    <div id="sync-output" style="margin-top:16px;"></div>
+                </div>
+
+                <div class="card" style="grid-column: span 2;">
                     <h2>Saved Backups</h2>
                     <div id="backups-list"><div class="loading">Loading...</div></div>
                 </div>
@@ -554,10 +611,12 @@
         }
 
         // ===== Backup =====
+        let backupData = null;
         async function loadBackupInfo() {
             try {
                 const res = await fetch('/api/backup/info');
                 const data = await res.json();
+                backupData = data;
 
                 const ng = data.servers.nginx, ap = data.servers.apache, cb = data.certbot;
                 const badge = (s, ok) => `<span class="status-badge ${ok ? 'status-installed' : 'status-missing'}">${s}</span>`;
@@ -577,6 +636,18 @@
                     sel = '<div class="loading">No website directories found in /var/www</div>';
                 }
                 document.getElementById('sitefiles-selection').innerHTML = sel;
+
+                // populate the rsync transfer site list too
+                let syncSel = '';
+                if (data.www_dirs.length) {
+                    for (const d of data.www_dirs) {
+                        syncSel += `<div class="checkbox-group" style="margin-bottom:6px;"><input type="checkbox" class="sync-site-cb" value="${d.name}"><label>${d.name} <span style="color:#64748b">(${d.size})</span></label></div>`;
+                    }
+                } else {
+                    syncSel = '<div class="loading">No website directories found in /var/www</div>';
+                }
+                const syncEl = document.getElementById('sync-sites');
+                if (syncEl) syncEl.innerHTML = syncSel;
 
                 let bl = '';
                 if (data.backups.length) {
@@ -760,6 +831,102 @@
             importToken = null;
             document.getElementById('import-details').innerHTML = '';
             document.getElementById('import-file').value = '';
+        }
+
+        // ===== Server-to-server rsync transfer =====
+        let syncPollTimer = null;
+        let currentSyncJob = null;
+
+        function toggleSyncAuth(method) {
+            document.getElementById('sync-key-group').style.display = method === 'key' ? 'block' : 'none';
+            document.getElementById('sync-pw-group').style.display = method === 'password' ? 'block' : 'none';
+        }
+
+        function syncPayload() {
+            return {
+                user: document.getElementById('sync-user').value.trim(),
+                host: document.getElementById('sync-host').value.trim(),
+                port: document.getElementById('sync-port').value.trim() || '22',
+                auth: document.getElementById('sync-auth').value,
+                key: document.getElementById('sync-key').value.trim(),
+                password: document.getElementById('sync-pw').value,
+                dest_base: document.getElementById('sync-dest').value.trim() || '/var/www',
+                sites: Array.from(document.querySelectorAll('.sync-site-cb:checked')).map(c => c.value),
+                include_configs: document.getElementById('sync-configs').checked,
+                include_certbot: document.getElementById('sync-certbot').checked,
+                remote_sudo: document.getElementById('sync-remote-sudo').checked,
+                dry_run: document.getElementById('sync-dryrun').checked,
+                delete: document.getElementById('sync-delete').checked
+            };
+        }
+
+        async function testSync(btn) {
+            const orig = btn.textContent; btn.disabled = true; btn.textContent = 'Testing...';
+            try {
+                const res = await fetch('/api/sync/test', {
+                    method: 'POST', headers: { 'Content-Type': 'application/json' },
+                    body: JSON.stringify(syncPayload())
+                });
+                const data = await res.json();
+                showToast(data.message, data.success ? 'success' : 'error');
+            } catch (e) { showToast('Connection test failed', 'error'); }
+            btn.disabled = false; btn.textContent = orig;
+        }
+
+        async function startSync(btn) {
+            const p = syncPayload();
+            if (!p.sites.length && !p.include_configs && !p.include_certbot) {
+                showToast('Select at least one website or option to transfer', 'error'); return;
+            }
+            const verb = p.dry_run ? 'Run a dry-run preview' : 'Start transferring data';
+            if (!confirm(`${verb} to ${p.user}@${p.host}?`)) return;
+            btn.disabled = true; btn.textContent = 'Starting...';
+            try {
+                const res = await fetch('/api/sync/start', {
+                    method: 'POST', headers: { 'Content-Type': 'application/json' },
+                    body: JSON.stringify(p)
+                });
+                const data = await res.json();
+                if (!data.success) { showToast(data.message, 'error'); btn.disabled = false; btn.textContent = 'Start Transfer'; return; }
+                showToast(data.message, 'success');
+                currentSyncJob = data.job_id;
+                pollSync();
+                syncPollTimer = setInterval(pollSync, 2000);
+            } catch (e) { showToast('Failed to start transfer', 'error'); }
+            btn.disabled = false; btn.textContent = 'Start Transfer';
+        }
+
+        async function pollSync() {
+            if (!currentSyncJob) return;
+            try {
+                const res = await fetch('/api/sync/status/' + currentSyncJob);
+                const data = await res.json();
+                if (!data.success) return;
+                const state = data.running ? '<span style="color:#fde047;">● running</span>'
+                    : (data.ok ? '<span style="color:#86efac;">✓ completed</span>' : '<span style="color:#fca5a5;">✕ finished with errors</span>');
+                let html = '<div style="background:#0f172a; border-radius:8px; padding:12px;">';
+                html += `<div style="display:flex; justify-content:space-between; align-items:center; margin-bottom:8px;">
+                            <strong>Transfer status: ${state}</strong>
+                            ${data.running ? '<button class="btn btn-danger" style="padding:6px 12px;" onclick="cancelSync()">Cancel</button>' : ''}
+                         </div>`;
+                html += `<pre style="white-space:pre-wrap; word-break:break-word; max-height:300px; overflow-y:auto; font-size:0.78rem; color:#cbd5e1; margin:0;">${(data.output || '').replace(/</g, '&lt;')}</pre>`;
+                html += '</div>';
+                document.getElementById('sync-output').innerHTML = html;
+                if (data.done) {
+                    clearInterval(syncPollTimer); syncPollTimer = null;
+                    showToast(data.ok ? 'Transfer completed successfully' : 'Transfer finished with errors — see the log', data.ok ? 'success' : 'error');
+                    currentSyncJob = null;
+                }
+            } catch (e) { /* keep polling */ }
+        }
+
+        async function cancelSync() {
+            if (!currentSyncJob) return;
+            try {
+                const res = await fetch('/api/sync/cancel/' + currentSyncJob, { method: 'POST' });
+                const data = await res.json();
+                showToast(data.message, data.success ? 'success' : 'error');
+            } catch (e) { showToast('Cancel failed', 'error'); }
         }
 
         function loadAll() {

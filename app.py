@@ -6,6 +6,7 @@ import re
 import json
 import datetime
 import hmac
+import shlex
 
 try:
     from dotenv import load_dotenv
@@ -1059,6 +1060,183 @@ def import_cancel():
     if token and re.match(r"^[A-Za-z0-9_]+$", token):
         run_cmd(f"sudo rm -rf {os.path.join(IMPORTS_DIR, token)}")
     return jsonify({"success": True})
+
+
+# ============ SERVER-TO-SERVER SYNC (rsync over SSH) ============
+
+SYNC_DIR = "/tmp/vps-manager-sync"
+sync_jobs = {}  # job_id -> {proc, log, remote, pwfile, ...}
+
+_USER_RE = re.compile(r"^[a-zA-Z0-9._-]+$")
+_HOST_RE = re.compile(r"^[a-zA-Z0-9.:_-]+$")
+_PATH_RE = re.compile(r"^/[a-zA-Z0-9._/-]+$")
+_NAME_RE = re.compile(r"^[a-zA-Z0-9._-]+$")
+
+
+def _safe(value, pattern):
+    """Validate a value against a strict allowlist pattern (blocks shell injection)."""
+    return bool(value) and bool(pattern.match(value)) and ".." not in value
+
+
+def _build_ssh(data):
+    """Build the ssh command used by rsync. Returns (ok, ssh_cmd, pwfile, error)."""
+    port = str(data.get("port", "22"))
+    if not re.match(r"^\d{1,5}$", port):
+        return False, None, None, "Invalid SSH port."
+    opts = f"-p {port} -o StrictHostKeyChecking=accept-new -o ConnectTimeout=15"
+    pwfile = None
+    if data.get("auth") == "password":
+        pw = data.get("password", "")
+        if not pw:
+            return False, None, None, "Password is required for password authentication."
+        os.makedirs(SYNC_DIR, exist_ok=True)
+        tmp = f"/tmp/.pw_{os.urandom(6).hex()}"
+        with open(tmp, "w") as fh:
+            fh.write(pw)
+        pwfile = f"{SYNC_DIR}/.pw_{os.urandom(6).hex()}"
+        run_cmd(f"sudo mv {shlex.quote(tmp)} {shlex.quote(pwfile)} && sudo chmod 600 {shlex.quote(pwfile)}")
+        ssh = f"sshpass -f {shlex.quote(pwfile)} ssh {opts}"
+    else:
+        key = (data.get("key") or "").strip()
+        if key:
+            if not _safe(key, _PATH_RE):
+                return False, None, None, "Invalid SSH key path."
+            opts += f" -i {key}"
+        opts += " -o BatchMode=yes"  # fail instead of hanging on a password prompt
+        ssh = f"ssh {opts}"
+    return True, ssh, pwfile, None
+
+
+@app.route("/api/sync/test", methods=["POST"])
+def sync_test():
+    """Verify SSH connectivity to the target server before a large transfer."""
+    data = request.get_json() or {}
+    user, host = data.get("user", ""), data.get("host", "")
+    if not _safe(user, _USER_RE):
+        return jsonify({"success": False, "message": "Invalid remote username."}), 400
+    if not _safe(host, _HOST_RE):
+        return jsonify({"success": False, "message": "Invalid remote host."}), 400
+    ok, ssh, pwfile, err = _build_ssh(data)
+    if not ok:
+        return jsonify({"success": False, "message": err}), 400
+    res = run_cmd_detailed(f'sudo {ssh} {user}@{host} "echo connection_ok"', timeout=30)
+    if pwfile:
+        run_cmd(f"sudo rm -f {shlex.quote(pwfile)}")
+    if res["success"] and "connection_ok" in res["stdout"]:
+        return jsonify({"success": True, "message": f"Connected to {user}@{host} successfully."})
+    return jsonify({"success": False,
+                    "message": f"Connection to {user}@{host} failed: {_tail(res['stderr'] or res['stdout']) or 'no response (check host, port, and credentials).'}"}), 400
+
+
+@app.route("/api/sync/start", methods=["POST"])
+def sync_start():
+    """Start a background rsync transfer of selected data to another server."""
+    data = request.get_json() or {}
+    user, host = data.get("user", ""), data.get("host", "")
+    if not _safe(user, _USER_RE):
+        return jsonify({"success": False, "message": "Invalid remote username."}), 400
+    if not _safe(host, _HOST_RE):
+        return jsonify({"success": False, "message": "Invalid remote host."}), 400
+
+    dest_base = data.get("dest_base") or "/var/www"
+    if not _safe(dest_base, _PATH_RE):
+        return jsonify({"success": False, "message": "Invalid destination path."}), 400
+
+    sites = data.get("sites", []) or []
+    for s in sites:
+        if not _safe(s, _NAME_RE):
+            return jsonify({"success": False, "message": f"Invalid site name '{s}'."}), 400
+
+    include_configs = bool(data.get("include_configs"))
+    include_certbot = bool(data.get("include_certbot"))
+    if not sites and not include_configs and not include_certbot:
+        return jsonify({"success": False, "message": "Select at least one thing to transfer."}), 400
+
+    ok, ssh, pwfile, err = _build_ssh(data)
+    if not ok:
+        return jsonify({"success": False, "message": err}), 400
+
+    flags = "-az --info=progress2 --human-readable"
+    if data.get("dry_run"):
+        flags += " --dry-run"
+    if data.get("delete"):
+        flags += " --delete"
+    rsync_path = ' --rsync-path="sudo rsync"' if data.get("remote_sudo", True) else ""
+    remote = f"{user}@{host}"
+
+    lines = ['echo "Starting transfer to %s"' % remote]
+    if data.get("dry_run"):
+        lines.append('echo "(DRY RUN — no files will actually be written)"')
+    if sites:
+        srcs = " ".join(f"/var/www/{s}" for s in sites)
+        lines.append(f'echo "=== Website files -> {remote}:{dest_base} ==="')
+        lines.append(f'rsync {flags}{rsync_path} -e "{ssh}" {srcs} {remote}:{dest_base}/')
+    if include_configs:
+        if os.path.exists(NGINX_SITES_AVAILABLE):
+            lines.append('echo "=== Nginx configs ==="')
+            lines.append(f'rsync {flags}{rsync_path} -e "{ssh}" /etc/nginx/sites-available /etc/nginx/sites-enabled {remote}:/etc/nginx/')
+        if os.path.exists(APACHE_SITES_AVAILABLE):
+            lines.append('echo "=== Apache configs ==="')
+            lines.append(f'rsync {flags}{rsync_path} -e "{ssh}" /etc/apache2/sites-available /etc/apache2/sites-enabled {remote}:/etc/apache2/')
+    if include_certbot and os.path.exists(LETSENCRYPT_DIR):
+        lines.append('echo "=== SSL certificates ==="')
+        lines.append(f'rsync {flags}{rsync_path} -e "{ssh}" /etc/letsencrypt {remote}:/etc/')
+    lines.append('echo "All transfers finished."')
+
+    job_id = "sync_" + datetime.datetime.now().strftime("%Y%m%d_%H%M%S") + "_" + os.urandom(3).hex()
+    os.makedirs(SYNC_DIR, exist_ok=True)
+    log = f"{SYNC_DIR}/{job_id}.log"
+    script = " && \\\n".join(lines)
+    full = f"sudo bash -c {shlex.quote(script)} > {shlex.quote(log)} 2>&1; echo EXIT_CODE:$? >> {shlex.quote(log)}"
+
+    proc = subprocess.Popen(full, shell=True)
+    sync_jobs[job_id] = {"proc": proc, "log": log, "remote": remote, "pwfile": pwfile,
+                         "started": datetime.datetime.now().isoformat()}
+    return jsonify({"success": True, "job_id": job_id,
+                    "message": f"Transfer to {remote} started in the background."})
+
+
+@app.route("/api/sync/status/<job_id>")
+def sync_status(job_id):
+    """Report progress/output of a running or finished sync job."""
+    if not re.match(r"^[A-Za-z0-9_]+$", job_id):
+        return jsonify({"success": False, "message": "Invalid job id."}), 400
+    log = f"{SYNC_DIR}/{job_id}.log"
+    job = sync_jobs.get(job_id)
+    if not job and not os.path.exists(log):
+        return jsonify({"success": False, "message": "Job not found."}), 404
+
+    output = ""
+    if os.path.exists(log):
+        with open(log, errors="replace") as fh:
+            output = fh.read()[-8000:]
+
+    running = bool(job and job["proc"].poll() is None)
+    if job and not running and job.get("pwfile"):
+        run_cmd(f"sudo rm -f {shlex.quote(job['pwfile'])}")  # clean up password file
+        job["pwfile"] = None
+
+    done = not running and ("EXIT_CODE:" in output or (job and job["proc"].poll() is not None))
+    ok = None
+    if done:
+        m = re.search(r"EXIT_CODE:(\d+)", output)
+        code = int(m.group(1)) if m else (job["proc"].returncode if job else 1)
+        ok = code == 0
+    return jsonify({"success": True, "running": running, "done": done, "ok": ok, "output": output})
+
+
+@app.route("/api/sync/cancel/<job_id>", methods=["POST"])
+def sync_cancel(job_id):
+    """Best-effort cancellation of a running sync job."""
+    job = sync_jobs.get(job_id)
+    if not job or job["proc"].poll() is not None:
+        return jsonify({"success": False, "message": "No running transfer to cancel."}), 400
+    run_cmd(f"sudo pkill -P {job['proc'].pid}")  # kill the sudo/rsync children
+    job["proc"].terminate()
+    if job.get("pwfile"):
+        run_cmd(f"sudo rm -f {shlex.quote(job['pwfile'])}")
+        job["pwfile"] = None
+    return jsonify({"success": True, "message": "Transfer cancelled."})
 
 
 if __name__ == "__main__":

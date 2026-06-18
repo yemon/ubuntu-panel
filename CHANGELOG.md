@@ -33,6 +33,9 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 ## [Unreleased]
 
 ### Added
+- Server-to-server transfer via rsync over SSH: copy large websites, configs, and SSL certificates directly to another server (only changed data sent, resumable)
+- Background transfer jobs with live progress log, connection test, dry-run, `--delete` mirror, key/password auth, and cancel
+- Input validation (allowlist patterns) on rsync host/user/path/site parameters to prevent shell injection
 - Automatic rollback on restore failure: each component is snapshotted before being overwritten and reverted to the previous working state if its step fails (web server config that fails its syntax test is never left applied)
 - Verbose, per-step restore report in the UI (success / error / skipped) with clear explanations
 - Clearer success and failure messages across install, service, backup, and import actions, surfacing the real underlying error instead of a generic failure

@@ -68,6 +68,14 @@ A modern, web-based control panel for managing Ubuntu VPS servers. Built with Fl
 - Choose exactly what to restore: Nginx configs, Apache configs, SSL certificates, and specific website directories
 - Web server config is syntax-tested before reload; SSL certificates are domain-bound so they keep working on a new server/IP (point DNS to it and verify renewal)
 
+### 🔁 Server-to-Server Transfer (rsync)
+- Copy large websites **directly** to another server over SSH — only changed data is sent and interrupted transfers resume, far more efficient than downloading/uploading huge archives
+- Transfer selected `/var/www` sites, web server configs, and SSL certificates in one job
+- SSH key or password authentication (password uses `sshpass`), custom port, optional `--rsync-path="sudo rsync"` for remotes that need sudo
+- **Test Connection** button, **dry-run** preview, optional `--delete` mirror mode
+- Runs in the background with a live progress log (so large transfers don't time out the request) and can be cancelled
+- Requires `rsync` on both servers (and `sshpass` on this server for password auth)
+
 ## 🚀 Quick Start
 
 ### Prerequisites
@@ -255,6 +263,10 @@ python app.py
 - `POST /api/import/upload` - Upload a backup archive and inspect its contents
 - `POST /api/import/apply` - Restore selected parts of an uploaded archive
 - `POST /api/import/cancel` - Discard an uploaded archive without restoring
+- `POST /api/sync/test` - Test SSH connectivity to a target server
+- `POST /api/sync/start` - Start a background rsync transfer to another server
+- `GET /api/sync/status/<job_id>` - Poll progress/output of a transfer
+- `POST /api/sync/cancel/<job_id>` - Cancel a running transfer
 
 ## 🤝 Contributing
 
