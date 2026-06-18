@@ -66,6 +66,10 @@
         .form-row { display: grid; grid-template-columns: 1fr 1fr; gap: 15px; }
         .checkbox-group { display: flex; align-items: center; gap: 10px; }
         .checkbox-group input { width: auto; }
+        .cb-controls { margin-bottom: 8px; font-size: 0.8rem; }
+        .cb-controls a { color: #38bdf8; text-decoration: none; cursor: pointer; }
+        .cb-controls a:hover { text-decoration: underline; }
+        .cb-list { max-height: 170px; overflow-y: auto; padding-right: 6px; border: 1px solid #334155; border-radius: 6px; padding: 8px; }
         .modal { display: none; position: fixed; top: 0; left: 0; right: 0; bottom: 0; background: rgba(0,0,0,0.8); z-index: 1000; align-items: center; justify-content: center; }
         .modal.active { display: flex; }
         .modal-content { background: #1e293b; border-radius: 12px; padding: 25px; width: 90%; max-width: 700px; max-height: 90vh; overflow-y: auto; }
@@ -684,6 +688,30 @@
 
         // ===== Backup =====
         let backupData = null;
+
+        function toggleAll(cls, checked) {
+            document.querySelectorAll('.' + cls).forEach(cb => { if (!cb.disabled) cb.checked = checked; });
+        }
+
+        // Build a scrollable checkbox list (≈5 items visible) with select-all controls.
+        function buildCheckList(cls, items, intro, emptyMsg) {
+            if (!items || !items.length) return `<div class="loading">${emptyMsg}</div>`;
+            let h = '';
+            if (intro) h += `<div style="color:#94a3b8; font-size:0.85rem; margin-bottom:8px;">${intro}</div>`;
+            h += `<div class="cb-controls">
+                    <a onclick="toggleAll('${cls}', true)">Select all</a>
+                    <span style="color:#475569;"> · </span>
+                    <a onclick="toggleAll('${cls}', false)">Unselect all</a>
+                  </div>`;
+            h += '<div class="cb-list">';
+            for (const it of items) {
+                const size = it.size ? ` <span style="color:#64748b">(${it.size})</span>` : '';
+                h += `<div class="checkbox-group" style="margin-bottom:6px;"><input type="checkbox" class="${cls}" value="${it.name}"><label>${it.name}${size}</label></div>`;
+            }
+            h += '</div>';
+            return h;
+        }
+
         async function loadBackupInfo() {
             try {
                 const res = await fetch('/api/backup/info');
@@ -701,39 +729,25 @@
                 ov += '</div>';
                 document.getElementById('backup-overview').innerHTML = ov;
 
-                let sel = '<div style="color:#94a3b8; font-size:0.85rem; margin-bottom:10px;">Choose which sites to include (leave all unchecked to include every site):</div>';
-                if (data.www_dirs.length) {
-                    for (const d of data.www_dirs) {
-                        sel += `<div class="checkbox-group" style="margin-bottom:6px;"><input type="checkbox" class="sitefile-cb" value="${d.name}"><label>${d.name} <span style="color:#64748b">(${d.size})</span></label></div>`;
-                    }
-                } else {
-                    sel = '<div class="loading">No website directories found in /var/www</div>';
-                }
-                document.getElementById('sitefiles-selection').innerHTML = sel;
+                document.getElementById('sitefiles-selection').innerHTML =
+                    buildCheckList('sitefile-cb', data.www_dirs,
+                        'Choose which sites to include (leave all unchecked to include every site):',
+                        'No website directories found in /var/www');
 
                 // populate the rsync transfer site list too
-                let syncSel = '';
-                if (data.www_dirs.length) {
-                    for (const d of data.www_dirs) {
-                        syncSel += `<div class="checkbox-group" style="margin-bottom:6px;"><input type="checkbox" class="sync-site-cb" value="${d.name}"><label>${d.name} <span style="color:#64748b">(${d.size})</span></label></div>`;
-                    }
-                } else {
-                    syncSel = '<div class="loading">No website directories found in /var/www</div>';
-                }
                 const syncEl = document.getElementById('sync-sites');
-                if (syncEl) syncEl.innerHTML = syncSel;
+                if (syncEl) syncEl.innerHTML =
+                    buildCheckList('sync-site-cb', data.www_dirs, '',
+                        'No website directories found in /var/www');
 
                 // MySQL database selection for full backup (reuses `my` from above)
-                let dbSel = '';
+                let dbSel;
                 if (!my.available) {
                     dbSel = '<div class="loading">MySQL is not installed on this server.</div>';
-                } else if (my.databases.length) {
-                    dbSel = '<div style="color:#94a3b8; font-size:0.85rem; margin-bottom:10px;">Choose databases to include (none checked = all):</div>';
-                    for (const db of my.databases) {
-                        dbSel += `<div class="checkbox-group" style="margin-bottom:6px;"><input type="checkbox" class="mysql-db-cb" value="${db.name}"><label>${db.name} <span style="color:#64748b">(${db.size})</span></label></div>`;
-                    }
                 } else {
-                    dbSel = '<div class="loading">No user databases found.</div>';
+                    dbSel = buildCheckList('mysql-db-cb', my.databases,
+                        'Choose databases to include (none checked = all):',
+                        'No user databases found.');
                 }
                 document.getElementById('mysql-selection').innerHTML = dbSel;
 
