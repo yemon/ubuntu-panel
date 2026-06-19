@@ -74,7 +74,8 @@ APACHE_SITES_ENABLED = "/etc/apache2/sites-enabled"
 def run_cmd(cmd):
     """Run shell command and return output"""
     try:
-        result = subprocess.run(cmd, shell=True, capture_output=True, text=True, timeout=120)
+        result = subprocess.run(cmd, shell=True, capture_output=True, text=True,
+                                timeout=120, stdin=subprocess.DEVNULL)
         return result.stdout.strip() if result.returncode == 0 else None
     except:
         return None
@@ -87,7 +88,8 @@ def run_cmd_detailed(cmd, timeout=120):
     clear explanation of why something failed.
     """
     try:
-        result = subprocess.run(cmd, shell=True, capture_output=True, text=True, timeout=timeout)
+        result = subprocess.run(cmd, shell=True, capture_output=True, text=True,
+                                timeout=timeout, stdin=subprocess.DEVNULL)
         return {
             "success": result.returncode == 0,
             "returncode": result.returncode,
@@ -1317,7 +1319,7 @@ def sync_start():
     script = " && \\\n".join(lines)
     full = f"sudo bash -c {shlex.quote(script)} > {shlex.quote(log)} 2>&1; echo EXIT_CODE:$? >> {shlex.quote(log)}"
 
-    proc = subprocess.Popen(full, shell=True)
+    proc = subprocess.Popen(full, shell=True, stdin=subprocess.DEVNULL)
     sync_jobs[job_id] = {"proc": proc, "log": log, "remote": remote, "pwfile": pwfile,
                          "started": datetime.datetime.now().isoformat()}
     return jsonify({"success": True, "job_id": job_id,
@@ -1389,7 +1391,7 @@ def _launch_transfer(lines, remote, pwfile):
     log = f"{SYNC_DIR}/{job_id}.log"
     script = "set -o pipefail\nMIGRATION_FAILED=0\n" + "\n".join(lines) + "\nexit $MIGRATION_FAILED"
     full = f"sudo bash -c {shlex.quote(script)} > {shlex.quote(log)} 2>&1; echo EXIT_CODE:$? >> {shlex.quote(log)}"
-    proc = subprocess.Popen(full, shell=True)
+    proc = subprocess.Popen(full, shell=True, stdin=subprocess.DEVNULL)
     sync_jobs[job_id] = {"proc": proc, "log": log, "remote": remote, "pwfile": pwfile,
                          "started": datetime.datetime.now().isoformat()}
     return job_id
