@@ -1588,4 +1588,4 @@ if __name__ == "__main__":
             raise SystemExit(f"No free port found in range {requested}-{requested + 19}.")
         os.environ["PORT"] = str(port)  # so the reloader child reuses it
         _print_banner(port, requested)
-    app.run(host="0.0.0.0", port=port, debug=True)
+    app.run(host="0.0.0.0", port=port, debug=True, threaded=True)
